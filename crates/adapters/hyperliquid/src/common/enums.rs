@@ -602,7 +602,9 @@ impl HyperliquidRejectCode {
     }
 }
 
-/// Represents Hyperliquid order status from API responses
+/// Represents Hyperliquid order status from API responses.
+///
+/// Hyperliquid uses lowercase status values with camelCase for compound words.
 #[derive(
     Copy,
     Clone,
@@ -617,36 +619,135 @@ impl HyperliquidRejectCode {
     Serialize,
     Deserialize,
 )]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
 pub enum HyperliquidOrderStatus {
-    /// Order has been accepted and is open
+    /// Order has been accepted and is open.
+    #[serde(rename = "open")]
     Open,
-    /// Order has been accepted and is open (alternative representation)
+    /// Order has been accepted and is open (alternative representation).
+    #[serde(rename = "accepted")]
     Accepted,
-    /// Order has been partially filled
-    PartiallyFilled,
-    /// Order has been completely filled
+    /// Order has been triggered (for conditional orders).
+    #[serde(rename = "triggered")]
+    Triggered,
+    /// Order has been completely filled.
+    #[serde(rename = "filled")]
     Filled,
-    /// Order has been canceled
+    /// Order has been canceled.
+    #[serde(rename = "canceled")]
     Canceled,
-    /// Order has been canceled (alternative spelling)
-    Cancelled,
-    /// Order was rejected by the exchange
+    /// Order was rejected by the exchange.
+    #[serde(rename = "rejected")]
     Rejected,
-    /// Order has expired
-    Expired,
+    // Specific cancel reasons - all map to CANCELED status
+    /// Order canceled due to margin requirements.
+    #[serde(rename = "marginCanceled")]
+    MarginCanceled,
+    /// Order canceled due to vault withdrawal.
+    #[serde(rename = "vaultWithdrawalCanceled")]
+    VaultWithdrawalCanceled,
+    /// Order canceled due to open interest cap.
+    #[serde(rename = "openInterestCapCanceled")]
+    OpenInterestCapCanceled,
+    /// Order canceled due to self trade prevention.
+    #[serde(rename = "selfTradeCanceled")]
+    SelfTradeCanceled,
+    /// Order canceled due to reduce only constraint.
+    #[serde(rename = "reduceOnlyCanceled")]
+    ReduceOnlyCanceled,
+    /// Order canceled because sibling order was filled.
+    #[serde(rename = "siblingFilledCanceled")]
+    SiblingFilledCanceled,
+    /// Order canceled due to delisting.
+    #[serde(rename = "delistedCanceled")]
+    DelistedCanceled,
+    /// Order canceled due to liquidation.
+    #[serde(rename = "liquidatedCanceled")]
+    LiquidatedCanceled,
+    /// Order was scheduled for cancel.
+    #[serde(rename = "scheduledCancel")]
+    ScheduledCancel,
+    // Specific reject reasons - all map to REJECTED status
+    /// Order rejected due to tick size.
+    #[serde(rename = "tickRejected")]
+    TickRejected,
+    /// Order rejected due to minimum trade notional.
+    #[serde(rename = "minTradeNtlRejected")]
+    MinTradeNtlRejected,
+    /// Order rejected due to perp margin.
+    #[serde(rename = "perpMarginRejected")]
+    PerpMarginRejected,
+    /// Order rejected due to reduce only constraint.
+    #[serde(rename = "reduceOnlyRejected")]
+    ReduceOnlyRejected,
+    /// Order rejected due to bad ALO price.
+    #[serde(rename = "badAloPxRejected")]
+    BadAloPxRejected,
+    /// IOC order canceled and rejected.
+    #[serde(rename = "iocCancelRejected")]
+    IocCancelRejected,
+    /// Order rejected due to bad trigger price.
+    #[serde(rename = "badTriggerPxRejected")]
+    BadTriggerPxRejected,
+    /// Market order rejected due to no liquidity.
+    #[serde(rename = "marketOrderNoLiquidityRejected")]
+    MarketOrderNoLiquidityRejected,
+    /// Order rejected due to open interest cap.
+    #[serde(rename = "positionIncreaseAtOpenInterestCapRejected")]
+    PositionIncreaseAtOpenInterestCapRejected,
+    /// Order rejected due to position flip at open interest cap.
+    #[serde(rename = "positionFlipAtOpenInterestCapRejected")]
+    PositionFlipAtOpenInterestCapRejected,
+    /// Order rejected due to too aggressive at open interest cap.
+    #[serde(rename = "tooAggressiveAtOpenInterestCapRejected")]
+    TooAggressiveAtOpenInterestCapRejected,
+    /// Order rejected due to open interest increase.
+    #[serde(rename = "openInterestIncreaseRejected")]
+    OpenInterestIncreaseRejected,
+    /// Order rejected due to insufficient spot balance.
+    #[serde(rename = "insufficientSpotBalanceRejected")]
+    InsufficientSpotBalanceRejected,
+    /// Order rejected by oracle.
+    #[serde(rename = "oracleRejected")]
+    OracleRejected,
+    /// Order rejected due to perp max position.
+    #[serde(rename = "perpMaxPositionRejected")]
+    PerpMaxPositionRejected,
 }
 
 impl From<HyperliquidOrderStatus> for OrderStatus {
     fn from(status: HyperliquidOrderStatus) -> Self {
         match status {
             HyperliquidOrderStatus::Open | HyperliquidOrderStatus::Accepted => Self::Accepted,
-            HyperliquidOrderStatus::PartiallyFilled => Self::PartiallyFilled,
+            HyperliquidOrderStatus::Triggered => Self::Triggered,
             HyperliquidOrderStatus::Filled => Self::Filled,
-            HyperliquidOrderStatus::Canceled | HyperliquidOrderStatus::Cancelled => Self::Canceled,
-            HyperliquidOrderStatus::Rejected => Self::Rejected,
-            HyperliquidOrderStatus::Expired => Self::Expired,
+            // All cancel variants map to CANCELED
+            HyperliquidOrderStatus::Canceled
+            | HyperliquidOrderStatus::MarginCanceled
+            | HyperliquidOrderStatus::VaultWithdrawalCanceled
+            | HyperliquidOrderStatus::OpenInterestCapCanceled
+            | HyperliquidOrderStatus::SelfTradeCanceled
+            | HyperliquidOrderStatus::ReduceOnlyCanceled
+            | HyperliquidOrderStatus::SiblingFilledCanceled
+            | HyperliquidOrderStatus::DelistedCanceled
+            | HyperliquidOrderStatus::LiquidatedCanceled
+            | HyperliquidOrderStatus::ScheduledCancel => Self::Canceled,
+            // All reject variants map to REJECTED
+            HyperliquidOrderStatus::Rejected
+            | HyperliquidOrderStatus::TickRejected
+            | HyperliquidOrderStatus::MinTradeNtlRejected
+            | HyperliquidOrderStatus::PerpMarginRejected
+            | HyperliquidOrderStatus::ReduceOnlyRejected
+            | HyperliquidOrderStatus::BadAloPxRejected
+            | HyperliquidOrderStatus::IocCancelRejected
+            | HyperliquidOrderStatus::BadTriggerPxRejected
+            | HyperliquidOrderStatus::MarketOrderNoLiquidityRejected
+            | HyperliquidOrderStatus::PositionIncreaseAtOpenInterestCapRejected
+            | HyperliquidOrderStatus::PositionFlipAtOpenInterestCapRejected
+            | HyperliquidOrderStatus::TooAggressiveAtOpenInterestCapRejected
+            | HyperliquidOrderStatus::OpenInterestIncreaseRejected
+            | HyperliquidOrderStatus::InsufficientSpotBalanceRejected
+            | HyperliquidOrderStatus::OracleRejected
+            | HyperliquidOrderStatus::PerpMaxPositionRejected => Self::Rejected,
         }
     }
 }
@@ -654,11 +755,37 @@ impl From<HyperliquidOrderStatus> for OrderStatus {
 pub fn hyperliquid_status_to_order_status(status: &str) -> OrderStatus {
     match status {
         "open" | "accepted" => OrderStatus::Accepted,
-        "partially_filled" => OrderStatus::PartiallyFilled,
+        "triggered" => OrderStatus::Triggered,
         "filled" => OrderStatus::Filled,
-        "canceled" | "cancelled" => OrderStatus::Canceled,
-        "rejected" => OrderStatus::Rejected,
-        "expired" => OrderStatus::Expired,
+        // All cancel variants
+        "canceled"
+        | "marginCanceled"
+        | "vaultWithdrawalCanceled"
+        | "openInterestCapCanceled"
+        | "selfTradeCanceled"
+        | "reduceOnlyCanceled"
+        | "siblingFilledCanceled"
+        | "delistedCanceled"
+        | "liquidatedCanceled"
+        | "scheduledCancel" => OrderStatus::Canceled,
+        // All reject variants
+        "rejected"
+        | "tickRejected"
+        | "minTradeNtlRejected"
+        | "perpMarginRejected"
+        | "reduceOnlyRejected"
+        | "badAloPxRejected"
+        | "iocCancelRejected"
+        | "badTriggerPxRejected"
+        | "marketOrderNoLiquidityRejected"
+        | "positionIncreaseAtOpenInterestCapRejected"
+        | "positionFlipAtOpenInterestCapRejected"
+        | "tooAggressiveAtOpenInterestCapRejected"
+        | "openInterestIncreaseRejected"
+        | "insufficientSpotBalanceRejected"
+        | "oracleRejected"
+        | "perpMaxPositionRejected" => OrderStatus::Rejected,
+        // Default to rejected for unknown statuses
         _ => OrderStatus::Rejected,
     }
 }
@@ -984,7 +1111,7 @@ mod tests {
 
     #[rstest]
     fn test_order_status_conversion() {
-        // Test HyperliquidOrderStatus to OrderState conversion
+        // Test HyperliquidOrderStatus to OrderStatus conversion
         assert_eq!(
             OrderStatus::from(HyperliquidOrderStatus::Open),
             OrderStatus::Accepted
@@ -994,8 +1121,8 @@ mod tests {
             OrderStatus::Accepted
         );
         assert_eq!(
-            OrderStatus::from(HyperliquidOrderStatus::PartiallyFilled),
-            OrderStatus::PartiallyFilled
+            OrderStatus::from(HyperliquidOrderStatus::Triggered),
+            OrderStatus::Triggered
         );
         assert_eq!(
             OrderStatus::from(HyperliquidOrderStatus::Filled),
@@ -1006,22 +1133,38 @@ mod tests {
             OrderStatus::Canceled
         );
         assert_eq!(
-            OrderStatus::from(HyperliquidOrderStatus::Cancelled),
-            OrderStatus::Canceled
-        );
-        assert_eq!(
             OrderStatus::from(HyperliquidOrderStatus::Rejected),
             OrderStatus::Rejected
         );
+
+        // Test specific cancel reasons map to Canceled
         assert_eq!(
-            OrderStatus::from(HyperliquidOrderStatus::Expired),
-            OrderStatus::Expired
+            OrderStatus::from(HyperliquidOrderStatus::MarginCanceled),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            OrderStatus::from(HyperliquidOrderStatus::SelfTradeCanceled),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            OrderStatus::from(HyperliquidOrderStatus::ReduceOnlyCanceled),
+            OrderStatus::Canceled
+        );
+
+        // Test specific reject reasons map to Rejected
+        assert_eq!(
+            OrderStatus::from(HyperliquidOrderStatus::TickRejected),
+            OrderStatus::Rejected
+        );
+        assert_eq!(
+            OrderStatus::from(HyperliquidOrderStatus::PerpMarginRejected),
+            OrderStatus::Rejected
         );
     }
 
     #[rstest]
     fn test_order_status_string_mapping() {
-        // Test direct string to OrderState conversion
+        // Test direct string to OrderStatus conversion
         assert_eq!(
             hyperliquid_status_to_order_status("open"),
             OrderStatus::Accepted
@@ -1031,8 +1174,8 @@ mod tests {
             OrderStatus::Accepted
         );
         assert_eq!(
-            hyperliquid_status_to_order_status("partially_filled"),
-            OrderStatus::PartiallyFilled
+            hyperliquid_status_to_order_status("triggered"),
+            OrderStatus::Triggered
         );
         assert_eq!(
             hyperliquid_status_to_order_status("filled"),
@@ -1043,26 +1186,76 @@ mod tests {
             OrderStatus::Canceled
         );
         assert_eq!(
-            hyperliquid_status_to_order_status("cancelled"),
-            OrderStatus::Canceled
-        );
-        assert_eq!(
             hyperliquid_status_to_order_status("rejected"),
             OrderStatus::Rejected
         );
+
+        // Test camelCase cancel reasons
         assert_eq!(
-            hyperliquid_status_to_order_status("expired"),
-            OrderStatus::Expired
+            hyperliquid_status_to_order_status("marginCanceled"),
+            OrderStatus::Canceled
         );
+        assert_eq!(
+            hyperliquid_status_to_order_status("selfTradeCanceled"),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            hyperliquid_status_to_order_status("reduceOnlyCanceled"),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            hyperliquid_status_to_order_status("liquidatedCanceled"),
+            OrderStatus::Canceled
+        );
+
+        // Test camelCase reject reasons
+        assert_eq!(
+            hyperliquid_status_to_order_status("tickRejected"),
+            OrderStatus::Rejected
+        );
+        assert_eq!(
+            hyperliquid_status_to_order_status("perpMarginRejected"),
+            OrderStatus::Rejected
+        );
+
+        // Unknown status defaults to Rejected
         assert_eq!(
             hyperliquid_status_to_order_status("unknown_status"),
             OrderStatus::Rejected
         );
     }
 
-    // ========================================================================
-    // Conditional Order Tests
-    // ========================================================================
+    #[rstest]
+    fn test_order_status_serde_deserialization() {
+        // Test that camelCase status values deserialize correctly
+        let open: HyperliquidOrderStatus = serde_json::from_str(r#""open""#).unwrap();
+        assert_eq!(open, HyperliquidOrderStatus::Open);
+
+        let canceled: HyperliquidOrderStatus = serde_json::from_str(r#""canceled""#).unwrap();
+        assert_eq!(canceled, HyperliquidOrderStatus::Canceled);
+
+        let margin_canceled: HyperliquidOrderStatus =
+            serde_json::from_str(r#""marginCanceled""#).unwrap();
+        assert_eq!(margin_canceled, HyperliquidOrderStatus::MarginCanceled);
+
+        let self_trade_canceled: HyperliquidOrderStatus =
+            serde_json::from_str(r#""selfTradeCanceled""#).unwrap();
+        assert_eq!(
+            self_trade_canceled,
+            HyperliquidOrderStatus::SelfTradeCanceled
+        );
+
+        let reduce_only_canceled: HyperliquidOrderStatus =
+            serde_json::from_str(r#""reduceOnlyCanceled""#).unwrap();
+        assert_eq!(
+            reduce_only_canceled,
+            HyperliquidOrderStatus::ReduceOnlyCanceled
+        );
+
+        let tick_rejected: HyperliquidOrderStatus =
+            serde_json::from_str(r#""tickRejected""#).unwrap();
+        assert_eq!(tick_rejected, HyperliquidOrderStatus::TickRejected);
+    }
 
     #[rstest]
     fn test_hyperliquid_tpsl_serialization() {

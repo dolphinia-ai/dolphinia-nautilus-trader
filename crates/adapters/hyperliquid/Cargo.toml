@@ -109,6 +109,14 @@ rstest = { workspace = true }
 tracing-test = { workspace = true }
 
 [[bin]]
+name = "hyperliquid-builder-fee-verify"
+path = "bin/builder_fee_verify.rs"
+
+[[bin]]
+name = "hyperliquid-builder-fee-approve"
+path = "bin/builder_fee_approve.rs"
+
+[[bin]]
 name = "hyperliquid-http-public"
 path = "bin/http_public.rs"
 
@@ -131,3 +139,7 @@ path = "bin/http_exec.rs"
 [[bin]]
 name = "hyperliquid-capture-test-data"
 path = "bin/capture_test_data.rs"
+
+[[bin]]
+name = "hyperliquid-test-address"
+path = "bin/test_address.rs"

@@ -22,6 +22,7 @@
 
 use std::{
     collections::HashMap,
+    env,
     num::NonZeroU32,
     sync::{Arc, LazyLock, RwLock},
     time::Duration,
@@ -35,19 +36,21 @@ use nautilus_core::{
 use nautilus_model::{
     data::{Bar, BarType},
     enums::{
-        BarAggregation, CurrencyType, OrderSide, OrderStatus, OrderType, TimeInForce, TriggerType,
+        AccountType, BarAggregation, CurrencyType, OrderSide, OrderStatus, OrderType, TimeInForce,
+        TriggerType,
     },
+    events::AccountState,
     identifiers::{AccountId, ClientOrderId, InstrumentId, Symbol, VenueOrderId},
     instruments::{CurrencyPair, Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
-    types::{Currency, Price, Quantity},
+    types::{AccountBalance, Currency, Money, Price, Quantity},
 };
 use nautilus_network::{
     http::{HttpClient, HttpClientError, HttpResponse, Method, USER_AGENT},
     ratelimiter::quota::Quota,
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use serde_json::Value;
 use ustr::Ustr;
 
@@ -59,9 +62,7 @@ use crate::{
             HyperliquidBarInterval, HyperliquidOrderStatus as HyperliquidOrderStatusEnum,
             HyperliquidProductType,
         },
-        parse::{
-            bar_type_to_interval, extract_asset_id_from_symbol, orders_to_hyperliquid_requests,
-        },
+        parse::{bar_type_to_interval, order_to_hyperliquid_request_with_asset},
     },
     http::{
         error::{Error, Result},
@@ -186,14 +187,14 @@ impl HyperliquidRawHttpClient {
         })
     }
 
-    /// Creates an authenticated client from environment variables.
+    /// Creates an authenticated client from environment variables for the specified network.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Auth`] if required environment variables are not set.
-    pub fn from_env() -> Result<Self> {
-        let secrets =
-            Secrets::from_env().map_err(|_| Error::auth("missing credentials in environment"))?;
+    pub fn from_env(is_testnet: bool) -> Result<Self> {
+        let secrets = Secrets::from_env(is_testnet)
+            .map_err(|e| Error::auth(format!("missing credentials in environment: {e}")))?;
         Self::with_credentials(&secrets, None, None)
             .map_err(|e| Error::auth(format!("Failed to create HTTP client: {e}")))
     }
@@ -697,6 +698,8 @@ pub struct HyperliquidHttpClient {
     pub(crate) inner: Arc<HyperliquidRawHttpClient>,
     instruments: Arc<RwLock<AHashMap<Ustr, InstrumentAny>>>,
     instruments_by_coin: Arc<RwLock<AHashMap<(Ustr, HyperliquidProductType), InstrumentAny>>>,
+    /// Mapping from symbol to asset index for order submission.
+    asset_indices: Arc<RwLock<AHashMap<Ustr, u32>>>,
     account_id: Option<AccountId>,
 }
 
@@ -722,16 +725,17 @@ impl HyperliquidHttpClient {
             inner: Arc::new(raw_client),
             instruments: Arc::new(RwLock::new(AHashMap::new())),
             instruments_by_coin: Arc::new(RwLock::new(AHashMap::new())),
+            asset_indices: Arc::new(RwLock::new(AHashMap::new())),
             account_id: None,
         })
     }
 
-    /// Creates a new [`HyperliquidHttpClient`] configured with credentials.
+    /// Creates a new [`HyperliquidHttpClient`] configured with a [`Secrets`] struct.
     ///
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be created.
-    pub fn with_credentials(
+    pub fn with_secrets(
         secrets: &Secrets,
         timeout_secs: Option<u64>,
         proxy_url: Option<String>,
@@ -742,23 +746,93 @@ impl HyperliquidHttpClient {
             inner: Arc::new(raw_client),
             instruments: Arc::new(RwLock::new(AHashMap::new())),
             instruments_by_coin: Arc::new(RwLock::new(AHashMap::new())),
+            asset_indices: Arc::new(RwLock::new(AHashMap::new())),
             account_id: None,
         })
     }
 
-    /// Creates an authenticated client from environment variables.
+    /// Creates an authenticated client from environment variables for the specified network.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Auth`] if required environment variables are not set.
-    pub fn from_env() -> Result<Self> {
-        let raw_client = HyperliquidRawHttpClient::from_env()?;
+    pub fn from_env(is_testnet: bool) -> Result<Self> {
+        let raw_client = HyperliquidRawHttpClient::from_env(is_testnet)?;
         Ok(Self {
             inner: Arc::new(raw_client),
             instruments: Arc::new(RwLock::new(AHashMap::new())),
             instruments_by_coin: Arc::new(RwLock::new(AHashMap::new())),
+            asset_indices: Arc::new(RwLock::new(AHashMap::new())),
             account_id: None,
         })
+    }
+
+    /// Creates a new [`HyperliquidHttpClient`] configured with credentials.
+    ///
+    /// If credentials are not provided, falls back to environment variables:
+    /// - Testnet: `HYPERLIQUID_TESTNET_PK`, `HYPERLIQUID_TESTNET_VAULT`
+    /// - Mainnet: `HYPERLIQUID_PK`, `HYPERLIQUID_VAULT`
+    ///
+    /// If no credentials are provided and no environment variables are set,
+    /// creates an unauthenticated client for public endpoints only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Auth`] if credentials are invalid.
+    pub fn with_credentials(
+        private_key: Option<String>,
+        vault_address: Option<String>,
+        is_testnet: bool,
+        timeout_secs: Option<u64>,
+        proxy_url: Option<String>,
+    ) -> Result<Self> {
+        // Determine which env vars to use based on is_testnet
+        let pk_env_var = if is_testnet {
+            "HYPERLIQUID_TESTNET_PK"
+        } else {
+            "HYPERLIQUID_PK"
+        };
+        let vault_env_var = if is_testnet {
+            "HYPERLIQUID_TESTNET_VAULT"
+        } else {
+            "HYPERLIQUID_VAULT"
+        };
+
+        // Resolve private key: explicit value -> env var -> None (unauthenticated)
+        let resolved_pk = match private_key {
+            Some(pk) => Some(pk),
+            None => env::var(pk_env_var).ok(),
+        };
+
+        // Resolve vault address: explicit value -> env var -> None
+        let resolved_vault = match vault_address {
+            Some(vault) => Some(vault),
+            None => env::var(vault_env_var).ok(),
+        };
+
+        match resolved_pk {
+            Some(pk) => {
+                let raw_client = HyperliquidRawHttpClient::from_credentials(
+                    &pk,
+                    resolved_vault.as_deref(),
+                    is_testnet,
+                    timeout_secs,
+                    proxy_url,
+                )?;
+                Ok(Self {
+                    inner: Arc::new(raw_client),
+                    instruments: Arc::new(RwLock::new(AHashMap::new())),
+                    instruments_by_coin: Arc::new(RwLock::new(AHashMap::new())),
+                    asset_indices: Arc::new(RwLock::new(AHashMap::new())),
+                    account_id: None,
+                })
+            }
+            None => {
+                // No credentials available, create unauthenticated client
+                Self::new(is_testnet, timeout_secs, proxy_url)
+                    .map_err(|e| Error::auth(format!("Failed to create HTTP client: {e}")))
+            }
+        }
     }
 
     /// Creates a new [`HyperliquidHttpClient`] configured with explicit credentials.
@@ -784,6 +858,7 @@ impl HyperliquidHttpClient {
             inner: Arc::new(raw_client),
             instruments: Arc::new(RwLock::new(AHashMap::new())),
             instruments_by_coin: Arc::new(RwLock::new(AHashMap::new())),
+            asset_indices: Arc::new(RwLock::new(AHashMap::new())),
             account_id: None,
         })
     }
@@ -968,6 +1043,10 @@ impl HyperliquidHttpClient {
     }
 
     /// Fetch and parse all available instrument definitions from Hyperliquid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if instrument parsing produces an invalid instrument state.
     pub async fn request_instruments(&self) -> Result<Vec<InstrumentAny>> {
         let mut defs: Vec<HyperliquidInstrumentDef> = Vec::new();
 
@@ -1007,7 +1086,38 @@ impl HyperliquidHttpClient {
             }
         }
 
+        // Populate asset indices map before converting to instruments
+        {
+            let mut asset_indices = self
+                .asset_indices
+                .write()
+                .expect("Failed to acquire write lock");
+            for def in &defs {
+                asset_indices.insert(def.symbol, def.asset_index);
+            }
+            tracing::debug!(count = asset_indices.len(), "Populated asset indices map");
+        }
+
         Ok(instruments_from_defs_owned(defs))
+    }
+
+    /// Get asset index for a symbol from the cached map.
+    ///
+    /// This is the authoritative source for asset indices used in order submission.
+    /// For perps: index in meta.universe (0, 1, 2, ...).
+    /// For spot: 10000 + index in spotMeta.universe.
+    ///
+    /// Returns `None` if the symbol is not found in the map.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal read lock cannot be acquired.
+    pub fn get_asset_index(&self, symbol: &str) -> Option<u32> {
+        let asset_indices = self
+            .asset_indices
+            .read()
+            .expect("Failed to acquire read lock");
+        asset_indices.get(&Ustr::from(symbol)).copied()
     }
 
     /// Get perpetuals metadata (internal helper).
@@ -1101,18 +1211,21 @@ impl HyperliquidHttpClient {
         client_order_id: Option<ClientOrderId>,
         venue_order_id: Option<VenueOrderId>,
     ) -> Result<()> {
-        // Extract asset ID from instrument symbol
+        // Get asset ID from cached indices map
         let symbol = instrument_id.symbol.as_str();
-        let asset_id = extract_asset_id_from_symbol(symbol)
-            .map_err(|e| Error::bad_request(format!("Failed to extract asset ID: {e}")))?;
+        let asset_id = self.get_asset_index(symbol).ok_or_else(|| {
+            Error::bad_request(format!(
+                "Asset index not found for symbol: {symbol}. Ensure instruments are loaded."
+            ))
+        })?;
 
         // Create cancel action based on which ID we have
         let action = if let Some(cloid) = client_order_id {
-            let cloid_hex = Cloid::from_hex(cloid)
-                .map_err(|e| Error::bad_request(format!("Invalid client order ID format: {e}")))?;
+            // Hash the client order ID to CLOID (same as order submission)
+            let cloid_hash = Cloid::from_client_order_id(cloid);
             let cancel_req = HyperliquidExecCancelByCloidRequest {
                 asset: asset_id,
-                cloid: cloid_hex,
+                cloid: cloid_hash,
             };
             HyperliquidExecAction::CancelByCloid {
                 cancels: vec![cancel_req],
@@ -1336,6 +1449,72 @@ impl HyperliquidHttpClient {
         Ok(reports)
     }
 
+    /// Request account state (balances and margins) for a user.
+    ///
+    /// Fetches clearinghouse state from Hyperliquid API and converts it to `AccountState`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API request fails or parsing fails.
+    pub async fn request_account_state(&self, user: &str) -> Result<AccountState> {
+        let state_response = self.info_clearinghouse_state(user).await?;
+        let ts_init = get_atomic_clock_realtime().get_time_ns();
+
+        tracing::trace!("Clearinghouse state response: {state_response}");
+
+        // Parse clearinghouse state
+        let state: crate::http::models::ClearinghouseState =
+            serde_json::from_value(state_response.clone()).map_err(|e| {
+                tracing::error!("Failed to parse clearinghouse state: {e}");
+                tracing::debug!("Raw response: {state_response}");
+                Error::bad_request(format!("Failed to parse clearinghouse state: {e}"))
+            })?;
+
+        // Create USDC currency for balances
+        let usdc = Currency::new("USDC", 6, 0, "0.000001", CurrencyType::Crypto);
+
+        // Build balances from cross margin summary
+        // Always include a USDC balance even if zero to ensure account state is valid
+        let balances = if let Some(margin) = &state.cross_margin_summary {
+            // total_raw_usd is the USDC collateral balance
+            let total_amount = margin.total_raw_usd.to_f64().unwrap_or(0.0);
+            // withdrawable is the free balance (optional, default to total if not present)
+            let free_amount = margin
+                .withdrawable
+                .and_then(|w| w.to_f64())
+                .unwrap_or(total_amount);
+            // locked = total - free
+            let locked_amount = total_amount - free_amount;
+
+            vec![AccountBalance::new(
+                Money::new(total_amount.max(0.0), usdc),
+                Money::new(locked_amount.max(0.0), usdc),
+                Money::new(free_amount.max(0.0), usdc),
+            )]
+        } else {
+            // No margin summary, return zero balance
+            vec![AccountBalance::new(
+                Money::new(0.0, usdc),
+                Money::new(0.0, usdc),
+                Money::new(0.0, usdc),
+            )]
+        };
+
+        let account_id = self.account_id.unwrap_or_default();
+
+        Ok(AccountState::new(
+            account_id,
+            AccountType::Margin,
+            balances,
+            vec![], // Margins can be added later if needed
+            true,   // reported
+            UUID4::new(),
+            ts_init,
+            ts_init,
+            None,
+        ))
+    }
+
     /// Request historical bars for an instrument.
     ///
     /// Fetches candle data from the Hyperliquid API and converts it to Nautilus bars.
@@ -1465,8 +1644,11 @@ impl HyperliquidHttpClient {
         reduce_only: bool,
     ) -> Result<OrderStatusReport> {
         let symbol = instrument_id.symbol.as_str();
-        let asset = extract_asset_id_from_symbol(symbol)
-            .map_err(|e| Error::bad_request(format!("Failed to extract asset ID: {e}")))?;
+        let asset = self.get_asset_index(symbol).ok_or_else(|| {
+            Error::bad_request(format!(
+                "Asset index not found for symbol: {symbol}. Ensure instruments are loaded."
+            ))
+        })?;
 
         let is_buy = matches!(order_side, OrderSide::Buy);
 
@@ -1559,20 +1741,16 @@ impl HyperliquidHttpClient {
         };
 
         // Build the order request
-        let hyperliquid_order =
-            HyperliquidExecPlaceOrderRequest {
-                asset,
-                is_buy,
-                price: price_decimal,
-                size: size_decimal,
-                reduce_only,
-                kind,
-                cloid: Some(Cloid::from_hex(client_order_id).map_err(|e| {
-                    Error::bad_request(format!("Invalid client order ID format: {e}"))
-                })?),
-            };
+        let hyperliquid_order = HyperliquidExecPlaceOrderRequest {
+            asset,
+            is_buy,
+            price: price_decimal,
+            size: size_decimal,
+            reduce_only,
+            kind,
+            cloid: Some(Cloid::from_client_order_id(client_order_id)),
+        };
 
-        // Create action
         let action = HyperliquidExecAction::Order {
             orders: vec![hyperliquid_order],
             grouping: HyperliquidExecGrouping::Na,
@@ -1750,19 +1928,26 @@ impl HyperliquidHttpClient {
 
     /// Submit multiple orders to the Hyperliquid exchange in a single request.
     ///
-    /// Uses the existing order conversion logic from `common::parse::orders_to_hyperliquid_requests`
-    /// to avoid code duplication and ensure consistency.
-    ///
     /// # Errors
     ///
     /// Returns an error if credentials are missing, order validation fails, serialization fails,
     /// or the API returns an error.
     pub async fn submit_orders(&self, orders: &[&OrderAny]) -> Result<Vec<OrderStatusReport>> {
-        // Use the existing parsing function from common::parse
-        let hyperliquid_orders = orders_to_hyperliquid_requests(orders)
-            .map_err(|e| Error::bad_request(format!("Failed to convert orders: {e}")))?;
+        // Convert orders using asset indices from the cached map
+        let mut hyperliquid_orders = Vec::with_capacity(orders.len());
+        for order in orders {
+            let instrument_id = order.instrument_id();
+            let symbol = instrument_id.symbol.as_str();
+            let asset = self.get_asset_index(symbol).ok_or_else(|| {
+                Error::bad_request(format!(
+                    "Asset index not found for symbol: {symbol}. Ensure instruments are loaded."
+                ))
+            })?;
+            let request = order_to_hyperliquid_request_with_asset(order, asset)
+                .map_err(|e| Error::bad_request(format!("Failed to convert order: {e}")))?;
+            hyperliquid_orders.push(request);
+        }
 
-        // Create typed action using HyperliquidExecAction (same as working Rust binary)
         let action = HyperliquidExecAction::Order {
             orders: hyperliquid_orders,
             grouping: HyperliquidExecGrouping::Na,

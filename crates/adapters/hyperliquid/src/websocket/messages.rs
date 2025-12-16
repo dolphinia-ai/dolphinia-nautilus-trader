@@ -330,6 +330,9 @@ pub enum HyperliquidWsMessage {
     OrderUpdates { data: Vec<WsOrderData> },
     /// User events.
     UserEvents { data: WsUserEventData },
+    /// Generic user channel (Hyperliquid sends fills/events on this channel).
+    #[serde(rename = "user")]
+    User { data: WsUserEventData },
     /// User fills.
     UserFills { data: WsUserFillsData },
     /// User funding payments.

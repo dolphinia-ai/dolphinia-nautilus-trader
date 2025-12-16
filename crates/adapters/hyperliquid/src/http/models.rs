@@ -15,7 +15,8 @@
 
 use std::fmt::Display;
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, keccak256};
+use nautilus_model::identifiers::ClientOrderId;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ustr::Ustr;
@@ -57,6 +58,18 @@ impl Cloid {
         }
 
         Ok(Self(bytes))
+    }
+
+    /// Creates a `Cloid` from a Nautilus `ClientOrderId` by hashing it.
+    ///
+    /// Uses keccak256 hash and takes the first 16 bytes to create a deterministic
+    /// 128-bit CLOID from any client order ID format.
+    #[must_use]
+    pub fn from_client_order_id(client_order_id: ClientOrderId) -> Self {
+        let hash = keccak256(client_order_id.as_str().as_bytes());
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        Self(bytes)
     }
 
     /// Converts the CLOID to a hex string with `0x` prefix.
@@ -818,6 +831,48 @@ mod tests {
             _ => panic!("Expected status response"),
         }
     }
+
+    #[rstest]
+    fn test_msgpack_serialization_matches_python() {
+        // Test that msgpack serialization includes the "type" tag properly.
+        // Python SDK serializes: {"type": "order", "orders": [...], "grouping": "na"}
+        // We need to verify rmp_serde::to_vec_named produces the same format.
+
+        let action = HyperliquidExecAction::Order {
+            orders: vec![],
+            grouping: HyperliquidExecGrouping::Na,
+            builder: None,
+        };
+
+        // First verify JSON is correct
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(
+            json.contains(r#""type":"order""#),
+            "JSON should have type tag: {json}"
+        );
+
+        // Serialize with msgpack
+        let msgpack_bytes = rmp_serde::to_vec_named(&action).unwrap();
+
+        // Decode back to a generic Value to inspect the structure
+        let decoded: serde_json::Value = rmp_serde::from_slice(&msgpack_bytes).unwrap();
+
+        // The decoded value should have a "type" field
+        assert!(
+            decoded.get("type").is_some(),
+            "MsgPack should have type tag. Decoded: {decoded:?}"
+        );
+        assert_eq!(
+            decoded.get("type").unwrap().as_str().unwrap(),
+            "order",
+            "Type should be 'order'"
+        );
+        assert!(decoded.get("orders").is_some(), "Should have orders field");
+        assert!(
+            decoded.get("grouping").is_some(),
+            "Should have grouping field"
+        );
+    }
 }
 
 /// Time-in-force for limit orders in exchange endpoint.
@@ -964,13 +1019,14 @@ pub struct HyperliquidExecCancelOrderRequest {
 }
 
 /// Cancel specification for canceling orders by client order ID via exchange endpoint.
+///
+/// Note: Unlike order placement which uses abbreviated field names ("a", "c"),
+/// cancel-by-cloid uses full field names ("asset", "cloid") per the Hyperliquid API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HyperliquidExecCancelByCloidRequest {
     /// Asset ID.
-    #[serde(rename = "a")]
     pub asset: AssetId,
     /// Client order ID to cancel.
-    #[serde(rename = "c")]
     pub cloid: Cloid,
 }
 
@@ -1453,8 +1509,9 @@ pub struct CrossMarginSummary {
     /// Withdrawable balance.
     #[serde(
         rename = "withdrawable",
-        serialize_with = "crate::common::parse::serialize_decimal_as_str",
-        deserialize_with = "crate::common::parse::deserialize_decimal_from_str"
+        default,
+        serialize_with = "crate::common::parse::serialize_optional_decimal_as_str",
+        deserialize_with = "crate::common::parse::deserialize_optional_decimal_from_str"
     )]
-    pub withdrawable: Decimal,
+    pub withdrawable: Option<Decimal>,
 }

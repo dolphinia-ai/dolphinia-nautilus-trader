@@ -32,6 +32,14 @@ pub const HYPERLIQUID_TESTNET_WS_URL: &str = "wss://api.hyperliquid-testnet.xyz/
 pub const HYPERLIQUID_TESTNET_INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
 pub const HYPERLIQUID_TESTNET_EXCHANGE_URL: &str = "https://api.hyperliquid-testnet.xyz/exchange";
 
+// Builder codes fee configuration for rebates
+// See: https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes
+// Fee is specified in tenths of a basis point (0.1 bps)
+// Note: Address MUST be lowercase for msgpack serialization to match Python SDK
+pub const NAUTILUS_BUILDER_FEE_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+pub const NAUTILUS_BUILDER_FEE_PERP_TENTHS_BP: u32 = 100; // 10 bps = 0.1%
+pub const NAUTILUS_BUILDER_FEE_SPOT_TENTHS_BP: u32 = 1000; // 100 bps = 1.0%
+
 /// Hyperliquid supported order types.
 ///
 /// # Notes
@@ -41,11 +49,6 @@ pub const HYPERLIQUID_TESTNET_EXCHANGE_URL: &str = "https://api.hyperliquid-test
 /// - Stop orders (StopMarket/StopLimit) are protective stops (sl).
 /// - If Touched orders (MarketIfTouched/LimitIfTouched) are profit-taking or entry orders (tp).
 /// - Post-only orders are implemented via ALO (Add Liquidity Only) time-in-force.
-///
-/// # Trigger Semantics
-///
-/// Hyperliquid uses last traded price for trigger evaluation.
-/// Future enhancement: Add support for mark/index price triggers if API supports it.
 pub const HYPERLIQUID_SUPPORTED_ORDER_TYPES: &[OrderType] = &[
     OrderType::Market,          // IOC limit order
     OrderType::Limit,           // Standard limit with GTC/IOC/ALO

@@ -65,6 +65,10 @@ pub struct HyperliquidInstrumentDef {
     pub quote: Ustr,
     /// Market type (perpetual or spot).
     pub market_type: HyperliquidMarketType,
+    /// Asset index used for order submission.
+    /// For perps: index in meta.universe (0, 1, 2, ...).
+    /// For spot: 10000 + index in spotMeta.universe.
+    pub asset_index: u32,
     /// Number of decimal places for price precision.
     pub price_decimals: u32,
     /// Number of decimal places for size precision.
@@ -98,7 +102,7 @@ pub fn parse_perp_instruments(meta: &PerpMeta) -> Result<Vec<HyperliquidInstrume
 
     let mut defs = Vec::new();
 
-    for asset in &meta.universe {
+    for (index, asset) in meta.universe.iter().enumerate() {
         // Include delisted assets but mark them as inactive
         // This allows parsing of historical data for delisted instruments
         let is_delisted = asset.is_delisted.unwrap_or(false);
@@ -114,6 +118,7 @@ pub fn parse_perp_instruments(meta: &PerpMeta) -> Result<Vec<HyperliquidInstrume
             base: asset.name.clone().into(),
             quote: "USD".into(), // Hyperliquid perps are USD-quoted (USDC settled)
             market_type: HyperliquidMarketType::Perp,
+            asset_index: index as u32,
             price_decimals,
             size_decimals: asset.sz_decimals,
             tick_size,
@@ -139,6 +144,7 @@ pub fn parse_perp_instruments(meta: &PerpMeta) -> Result<Vec<HyperliquidInstrume
 ///   for instruments that may have been traded
 pub fn parse_spot_instruments(meta: &SpotMeta) -> Result<Vec<HyperliquidInstrumentDef>, String> {
     const SPOT_MAX_DECIMALS: i32 = 8; // Hyperliquid spot price decimal limit
+    const SPOT_INDEX_OFFSET: u32 = 10000; // Spot assets use 10000 + index
 
     let mut defs = Vec::new();
 
@@ -148,7 +154,7 @@ pub fn parse_spot_instruments(meta: &SpotMeta) -> Result<Vec<HyperliquidInstrume
         tokens_by_index.insert(token.index, token);
     }
 
-    for pair in &meta.universe {
+    for (index, pair) in meta.universe.iter().enumerate() {
         // Load all pairs (including non-canonical) to support parsing fills/positions
         // for instruments that may have been traded but are not currently canonical
 
@@ -171,6 +177,7 @@ pub fn parse_spot_instruments(meta: &SpotMeta) -> Result<Vec<HyperliquidInstrume
             base: base_token.name.clone().into(),
             quote: quote_token.name.clone().into(),
             market_type: HyperliquidMarketType::Spot,
+            asset_index: SPOT_INDEX_OFFSET + index as u32,
             price_decimals,
             size_decimals: base_token.sz_decimals,
             tick_size,
@@ -465,16 +472,12 @@ pub fn parse_fill_report(
     let instrument_id = instrument.id();
     let venue_order_id = VenueOrderId::new(fill.oid.to_string());
 
-    // Construct trade_id from hash and time
-    let trade_id_str = format!("{}-{}", fill.hash, fill.time);
-    tracing::debug!(
-        "Parsing fill: hash={}, time={}, trade_id_str='{}', len={}",
-        fill.hash,
-        fill.time,
-        trade_id_str,
-        trade_id_str.len()
-    );
-
+    // Use last 36 chars of hash for TradeId (max length constraint)
+    let trade_id_str = if fill.hash.len() > 36 {
+        &fill.hash[fill.hash.len() - 36..]
+    } else {
+        &fill.hash
+    };
     let trade_id = TradeId::new(trade_id_str);
     let order_side = parse_fill_side(&fill.side);
 

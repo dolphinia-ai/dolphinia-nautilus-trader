@@ -28,6 +28,90 @@ Most users will define a configuration for a live trading node (as shown below)
 and won't need to work directly with these lower-level components.
 :::
 
+## Builder fees
+
+This integration is free and open source. Builder fees help keep the project sustainable
+by funding ongoing development and maintenance, without charging users directly.
+
+:::tip
+**Builder fees do not cost you extra.** Hyperliquid charges you the standard taker/maker fees and
+then pays a rebate to the NautilusTrader builder address, so your effective fees stay unchanged.
+:::
+
+:::info
+Builder fee rates:
+
+- **Perpetuals**: 0.1% (10 basis points) per trade.
+- **Spot**: 1.0% (100 basis points) per trade.
+
+See [Hyperliquid Builder Codes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes)
+and [Hyperliquid Fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees) for details.
+:::
+
+The builder address is controlled by Nautilus Systems Pty Ltd.
+
+### Verifying the builder address
+
+You can verify the builder address and fee configuration at any time:
+
+```bash
+python nautilus_trader/adapters/hyperliquid/scripts/builder_fee_verify.py
+```
+
+This displays the same address used when submitting orders, sourced directly from the Rust code.
+
+### Approving builder fees
+
+Approving the builder fee enables this free, open source integration to continue receiving
+updates and support.
+
+Before you can trade on Hyperliquid via NautilusTrader, you must approve the builder fee.
+This is a **one-time** setup step per wallet address, per network.
+
+:::warning
+You must sign the approval with your **main wallet** private key (the same key used for trading).
+This cannot be done with an API key or agent wallet.
+:::
+
+#### Running the approval script
+
+Set your private key and run the script:
+
+**Mainnet:**
+
+```bash
+export HYPERLIQUID_PK="your_private_key_here"
+python nautilus_trader/adapters/hyperliquid/scripts/builder_fee_approve.py
+```
+
+**Testnet:**
+
+```bash
+export HYPERLIQUID_TESTNET_PK="your_private_key_here"
+HYPERLIQUID_TESTNET=true python nautilus_trader/adapters/hyperliquid/scripts/builder_fee_approve.py
+```
+
+The script outputs confirmation of the approval. Once approved, all subsequent orders
+placed through NautilusTrader include the builder fee automatically.
+
+:::note
+The approval script requests a 1% allowance because Hyperliquid requires a single rate that covers
+all products. This allows you to trade both spot (1%) and perpetuals (0.1%) without needing
+separate approvals. The actual fee charged is the rate for each product type as shown above.
+:::
+
+:::note
+You only need to run this script **once** per wallet per network. The approval persists until you
+explicitly revoke it.
+:::
+
+### Troubleshooting
+
+**Error: `Order rejected: Builder fee has not been approved`**
+
+This error occurs when you attempt to place an order without first approving the builder fee.
+Run the approval script as described above to resolve this.
+
 ## Examples
 
 You can find live example scripts [here](https://github.com/nautechsystems/nautilus_trader/tree/develop/examples/live/hyperliquid/).
@@ -36,12 +120,25 @@ You can find live example scripts [here](https://github.com/nautechsystems/nauti
 
 Hyperliquid provides a testnet environment for testing strategies without risking real funds.
 
-### Getting testnet credentials
+### Getting testnet funds
 
-1. Visit the [Hyperliquid testnet portal](https://app.hyperliquid-testnet.xyz/)
-2. Connect your wallet (MetaMask or WalletConnect)
-3. The testnet will automatically create an account for your wallet address
-4. Request testnet funds from the faucet (if available)
+To receive testnet USDC, you must first have deposited on **mainnet** using the same wallet address:
+
+1. Visit the [Hyperliquid mainnet portal](https://app.hyperliquid.xyz/) and make a deposit with your wallet.
+2. Visit the [testnet faucet](https://app.hyperliquid-testnet.xyz/drip) using the same wallet.
+3. Claim 1,000 mock USDC from the faucet.
+
+:::note
+**Email wallet users**: Email login generates different addresses for mainnet vs testnet.
+To use the faucet, export your email wallet from mainnet, import it into MetaMask or Rabby,
+then connect the extension to testnet.
+:::
+
+### Creating a testnet account
+
+1. Visit the [Hyperliquid testnet portal](https://app.hyperliquid-testnet.xyz/).
+2. Connect your wallet (MetaMask, WalletConnect, or email).
+3. The testnet automatically creates an account for your wallet address.
 
 ### Exporting your private key
 
@@ -49,14 +146,14 @@ To use your testnet account with NautilusTrader, you need to export your wallet'
 
 **MetaMask:**
 
-1. Click the three dots menu next to your account
-2. Select "Account details"
-3. Click "Show private key"
-4. Enter your password and copy the private key
+1. Click the three dots menu next to your account.
+2. Select "Account details".
+3. Click "Show private key".
+4. Enter your password and copy the private key.
 
 :::warning
-**Never share your private keys**
-Store private keys securely using environment variables, never commit them to version control.
+**Never share your private keys.**
+Store private keys securely using environment variables; never commit them to version control.
 :::
 
 ### Setting environment variables
@@ -69,16 +166,16 @@ export HYPERLIQUID_TESTNET_PK="your_private_key_here"
 export HYPERLIQUID_TESTNET_VAULT="vault_address_here"
 ```
 
-The adapter will automatically load these when `testnet=True` in the configuration.
+The adapter automatically loads these when `testnet=True` in the configuration.
 
 ## Product support
 
-Hyperliquid currently supports perpetual futures contracts.
+Hyperliquid offers linear perpetual futures and native spot markets.
 
-| Product Type        | Data Feed | Trading | Notes                           |
-|---------------------|-----------|---------|----------------------------------|
-| Perpetual Futures   | ✓         | ✓       | Both PERP and SPOT instruments. |
-| Spot                | ✓         | ✓       | Native spot markets.             |
+| Product Type        | Data Feed | Trading | Notes                      |
+|---------------------|-----------|---------|----------------------------|
+| Perpetual Futures   | ✓         | ✓       | USDC-settled linear perps. |
+| Spot                | ✓         | ✓       | Native spot markets.       |
 
 :::note
 All instruments on Hyperliquid are settled in USDC.
@@ -172,6 +269,40 @@ order functionality with automatic TP/SL mode detection.
 | Cancel all orders| ✓          | ✓    | Cancel all orders for instrument/side. |
 | Batch cancel     | ✓          | ✓    | Cancel multiple orders in one request. |
 
+## Order books
+
+Order books can be maintained at full depth based on WebSocket subscription.
+Hyperliquid provides real-time order book updates via WebSocket streams.
+
+Order book snapshot rebuilds are triggered on:
+
+- Initial subscription of the order book data.
+- WebSocket reconnects.
+
+:::note
+There is a limitation of one order book per instrument per trader instance.
+:::
+
+## API credentials
+
+There are two options for supplying your credentials to the Hyperliquid clients.
+Either pass the corresponding values to the configuration objects, or
+set the following environment variables:
+
+For Hyperliquid mainnet clients, you can set:
+
+- `HYPERLIQUID_PK`
+- `HYPERLIQUID_VAULT` (optional, for vault trading)
+
+For Hyperliquid testnet clients, you can set:
+
+- `HYPERLIQUID_TESTNET_PK`
+- `HYPERLIQUID_TESTNET_VAULT` (optional, for vault trading)
+
+:::tip
+We recommend using environment variables to manage your credentials.
+:::
+
 ## Configuration
 
 ### Data client configuration options
@@ -231,4 +362,30 @@ config = TradingNodeConfig(
 :::note
 When `testnet=True`, the adapter automatically uses testnet environment variables
 (`HYPERLIQUID_TESTNET_PK` and `HYPERLIQUID_TESTNET_VAULT`) instead of mainnet variables.
+:::
+
+Then, create a `TradingNode` and add the client factories:
+
+```python
+from nautilus_trader.adapters.hyperliquid import HYPERLIQUID
+from nautilus_trader.adapters.hyperliquid import HyperliquidLiveDataClientFactory
+from nautilus_trader.adapters.hyperliquid import HyperliquidLiveExecClientFactory
+from nautilus_trader.live.node import TradingNode
+
+# Instantiate the live trading node with a configuration
+node = TradingNode(config=config)
+
+# Register the client factories with the node
+node.add_data_client_factory(HYPERLIQUID, HyperliquidLiveDataClientFactory)
+node.add_exec_client_factory(HYPERLIQUID, HyperliquidLiveExecClientFactory)
+
+# Finally build the node
+node.build()
+```
+
+## Contributing
+
+:::info
+For additional features or to contribute to the Hyperliquid adapter, please see our
+[contributing guide](https://github.com/nautechsystems/nautilus_trader/blob/develop/CONTRIBUTING.md).
 :::

@@ -67,10 +67,6 @@ class HyperliquidInstrumentProvider(InstrumentProvider):
         self._loaded_instruments: dict[InstrumentId, Instrument] = {}
         self._instruments_pyo3: list[Any] = []
 
-    # ---------------------------------------------------------------------
-    # Public helpers
-    # ---------------------------------------------------------------------
-
     def instruments_pyo3(self) -> list[Any]:
         """
         Return the cached PyO3 instruments (for WebSocket client).
@@ -81,10 +77,6 @@ class HyperliquidInstrumentProvider(InstrumentProvider):
 
         """
         return self._instruments_pyo3
-
-    # ---------------------------------------------------------------------
-    # InstrumentProvider interface
-    # ---------------------------------------------------------------------
 
     async def load_all_async(self, filters: dict | None = None) -> None:
         filters = filters or self._filters

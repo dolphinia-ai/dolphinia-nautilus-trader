@@ -351,11 +351,46 @@ impl FeedHandler {
                     result.push(msg);
                 }
             }
-            HyperliquidWsMessage::UserEvents { data } => {
+            HyperliquidWsMessage::UserEvents { data } | HyperliquidWsMessage::User { data } => {
+                // Process fills from userEvents channel (userFills channel is redundant)
+                match data {
+                    WsUserEventData::Fills { fills } => {
+                        tracing::debug!("Received {} fill(s) from userEvents channel", fills.len());
+                        for fill in &fills {
+                            tracing::debug!(
+                                "Fill: oid={}, coin={}, side={:?}, sz={}, px={}",
+                                fill.oid,
+                                fill.coin,
+                                fill.side,
+                                fill.sz,
+                                fill.px
+                            );
+                        }
+                        if let Some(account_id) = account_id {
+                            tracing::debug!("Processing fills with account_id={account_id}");
+                            if let Some(msg) =
+                                Self::handle_user_fills(&fills, instruments, account_id, ts_init)
+                            {
+                                tracing::debug!("Successfully created fill message");
+                                result.push(msg);
+                            } else {
+                                tracing::warn!("handle_user_fills returned None");
+                            }
+                        } else {
+                            tracing::warn!("Cannot process fills: account_id is None");
+                        }
+                    }
+                    _ => {
+                        tracing::debug!("Received non-fill user event: {:?}", data);
+                    }
+                }
+            }
+            HyperliquidWsMessage::UserFills { data } => {
+                // UserFills channel is redundant with userEvents, but handle it for
+                // backwards compatibility if explicitly subscribed
                 if let Some(account_id) = account_id
-                    && let WsUserEventData::Fills { fills } = data
                     && let Some(msg) =
-                        Self::handle_user_fills(&fills, instruments, account_id, ts_init)
+                        Self::handle_user_fills(&data.fills, instruments, account_id, ts_init)
                 {
                     result.push(msg);
                 }
@@ -444,8 +479,14 @@ impl FeedHandler {
 
         for fill in fills {
             if let Some(instrument) = instruments.get(&fill.coin) {
+                tracing::debug!("Found instrument for fill coin={}", fill.coin);
                 match parse_ws_fill_report(fill, instrument, account_id, ts_init) {
                     Ok(report) => {
+                        tracing::debug!(
+                            "Parsed fill report: venue_order_id={:?}, trade_id={:?}",
+                            report.venue_order_id,
+                            report.trade_id
+                        );
                         exec_reports.push(ExecutionReport::Fill(report));
                     }
                     Err(e) => {
@@ -453,7 +494,11 @@ impl FeedHandler {
                     }
                 }
             } else {
-                tracing::debug!("No instrument found for coin: {}", fill.coin);
+                tracing::warn!(
+                    "No instrument found for fill coin={}. Available keys: {:?}",
+                    fill.coin,
+                    instruments.keys().collect::<Vec<_>>()
+                );
             }
         }
 

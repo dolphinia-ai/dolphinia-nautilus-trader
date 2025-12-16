@@ -23,6 +23,8 @@ pub mod websocket;
 use nautilus_core::python::to_pyvalue_err;
 use pyo3::prelude::*;
 
+use crate::common::builder_fee::{BuilderFeeInfo, approve_from_env};
+
 /// Extract product type from a Hyperliquid symbol.
 ///
 /// # Errors
@@ -36,6 +38,58 @@ fn py_hyperliquid_product_type_from_symbol(
     crate::common::HyperliquidProductType::from_symbol(symbol).map_err(to_pyvalue_err)
 }
 
+/// Get Hyperliquid builder fee configuration information.
+///
+/// Returns a JSON string with the builder address and fee rates.
+#[pyfunction]
+#[pyo3(name = "get_hyperliquid_builder_fee_info")]
+fn py_get_hyperliquid_builder_fee_info() -> PyResult<String> {
+    let info = BuilderFeeInfo::new();
+    serde_json::to_string(&info).map_err(to_pyvalue_err)
+}
+
+/// Print Hyperliquid builder fee configuration to stdout.
+#[pyfunction]
+#[pyo3(name = "print_hyperliquid_builder_fee_info")]
+fn py_print_hyperliquid_builder_fee_info() {
+    BuilderFeeInfo::new().print();
+}
+
+/// Approve the Nautilus builder fee for a wallet.
+///
+/// This signs an EIP-712 `ApproveBuilderFee` action and submits it to Hyperliquid.
+/// The approval allows NautilusTrader to include builder fees on orders for this wallet.
+///
+/// This is a ONE-TIME setup step required before trading on Hyperliquid.
+///
+/// Reads private key from environment:
+/// - Testnet: `HYPERLIQUID_TESTNET_PK`
+/// - Mainnet: `HYPERLIQUID_PK`
+///
+/// Set `HYPERLIQUID_TESTNET=true` to use testnet.
+///
+/// # Returns
+///
+/// `true` if approval succeeded, `false` otherwise.
+///
+/// # Panics
+///
+/// Panics if the spawned thread panics or runtime creation fails.
+#[pyfunction]
+#[pyo3(name = "approve_hyperliquid_builder_fee")]
+fn py_approve_hyperliquid_builder_fee() -> bool {
+    std::thread::spawn(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+
+        runtime.block_on(approve_from_env())
+    })
+    .join()
+    .expect("Thread panicked")
+}
+
 /// Loaded as `nautilus_pyo3.hyperliquid`.
 #[pymodule]
 pub fn hyperliquid(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -46,11 +100,16 @@ pub fn hyperliquid(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::common::enums::HyperliquidTriggerPriceType>()?;
     m.add_class::<crate::common::enums::HyperliquidConditionalOrderType>()?;
     m.add_class::<crate::common::enums::HyperliquidTrailingOffsetType>()?;
+
     m.add_function(wrap_pyfunction!(urls::py_get_hyperliquid_http_base_url, m)?)?;
     m.add_function(wrap_pyfunction!(urls::py_get_hyperliquid_ws_url, m)?)?;
     m.add_function(wrap_pyfunction!(
         py_hyperliquid_product_type_from_symbol,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_get_hyperliquid_builder_fee_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_print_hyperliquid_builder_fee_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_approve_hyperliquid_builder_fee, m)?)?;
+
     Ok(())
 }

@@ -252,12 +252,12 @@ pub fn parse_ws_order_status_report(
 
     let time_in_force = TimeInForce::Gtc;
     let order_status = OrderStatus::from(order.status);
-    let quantity = parse_quantity(&order.order.sz, instrument, "order.sz")?;
 
-    // Calculate filled quantity (orig_sz - sz)
+    // orig_sz is the original order quantity, sz is the remaining quantity
     let orig_qty = parse_quantity(&order.order.orig_sz, instrument, "order.orig_sz")?;
+    let remaining_qty = parse_quantity(&order.order.sz, instrument, "order.sz")?;
     let filled_qty = Quantity::from_raw(
-        orig_qty.raw.saturating_sub(quantity.raw),
+        orig_qty.raw.saturating_sub(remaining_qty.raw),
         instrument.size_precision(),
     );
 
@@ -275,7 +275,7 @@ pub fn parse_ws_order_status_report(
         order_type,
         time_in_force,
         order_status,
-        quantity,
+        orig_qty, // Use original quantity, not remaining
         filled_qty,
         ts_accepted,
         ts_last,

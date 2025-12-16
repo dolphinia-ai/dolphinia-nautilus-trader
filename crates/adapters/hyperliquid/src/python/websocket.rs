@@ -499,6 +499,23 @@ impl HyperliquidWebSocketClient {
         })
     }
 
+    #[pyo3(name = "subscribe_user_fills")]
+    fn py_subscribe_user_fills<'py>(
+        &self,
+        py: Python<'py>,
+        user: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            client
+                .subscribe_user_fills(&user)
+                .await
+                .map_err(to_pyruntime_err)?;
+            Ok(())
+        })
+    }
+
     #[pyo3(name = "subscribe_mark_prices")]
     fn py_subscribe_mark_prices<'py>(
         &self,

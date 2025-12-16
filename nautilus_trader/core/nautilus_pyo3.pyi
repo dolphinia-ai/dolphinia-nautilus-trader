@@ -3920,6 +3920,8 @@ class OrderStatusReport:
     def cancel_reason(self) -> str | None: ...
     @property
     def ts_triggered(self) -> int | None: ...
+    @property
+    def is_open(self) -> bool: ...
 
 class PositionStatusReport:
     def __init__(
@@ -7771,6 +7773,11 @@ class CancelBroadcaster:
 # Hyperliquid
 
 def hyperliquid_product_type_from_symbol(symbol: str) -> HyperliquidProductType: ...
+def get_hyperliquid_builder_fee_info() -> dict: ...
+def print_hyperliquid_builder_fee_info() -> None: ...
+def approve_hyperliquid_builder_fee() -> None: ...
+def get_hyperliquid_http_base_url(is_testnet: bool = False) -> str: ...
+def get_hyperliquid_ws_url(is_testnet: bool = False) -> str: ...
 
 class HyperliquidProductType(Enum):
     PERP = "PERP"
@@ -7778,6 +7785,40 @@ class HyperliquidProductType(Enum):
 
     @classmethod
     def from_str(cls, value: str) -> HyperliquidProductType: ...
+
+class HyperliquidTriggerPriceType(Enum):
+    LAST = "LAST"
+    MARK = "MARK"
+    ORACLE = "ORACLE"
+
+    @classmethod
+    def from_str(cls, value: str) -> HyperliquidTriggerPriceType: ...
+
+class HyperliquidTpSl(Enum):
+    TP = "TP"
+    SL = "SL"
+
+    @classmethod
+    def from_str(cls, value: str) -> HyperliquidTpSl: ...
+
+class HyperliquidConditionalOrderType(Enum):
+    STOP_MARKET = "STOP_MARKET"
+    STOP_LIMIT = "STOP_LIMIT"
+    TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
+    TAKE_PROFIT_LIMIT = "TAKE_PROFIT_LIMIT"
+    TRAILING_STOP_MARKET = "TRAILING_STOP_MARKET"
+    TRAILING_STOP_LIMIT = "TRAILING_STOP_LIMIT"
+
+    @classmethod
+    def from_str(cls, value: str) -> HyperliquidConditionalOrderType: ...
+
+class HyperliquidTrailingOffsetType(Enum):
+    PRICE = "PRICE"
+    PERCENTAGE = "PERCENTAGE"
+    BASIS_POINTS = "BASIS_POINTS"
+
+    @classmethod
+    def from_str(cls, value: str) -> HyperliquidTrailingOffsetType: ...
 
 class HyperliquidHttpClient:
     def __init__(
@@ -7798,14 +7839,49 @@ class HyperliquidHttpClient:
         timeout_secs: int | None = None,
         proxy_url: str | None = None,
     ) -> HyperliquidHttpClient: ...
-    async def get_perp_meta(self) -> list[dict]: ...
-    async def get_spot_meta(self) -> list[dict]: ...
-    async def get_l2_book(self, coin: str) -> dict: ...
+    def cache_instrument(self, instrument: Instrument) -> None: ...
+    def set_account_id(self, account_id: str) -> None: ...
+    def get_user_address(self) -> str: ...
+    async def get_perp_meta(self) -> str: ...
+    async def get_spot_meta(self) -> str: ...
     async def load_instrument_definitions(
         self,
         include_perp: bool = True,
         include_spot: bool = True,
     ) -> list[Instrument]: ...
+    async def request_order_status_reports(
+        self,
+        instrument_id: str | None = None,
+    ) -> list[OrderStatusReport]: ...
+    async def request_fill_reports(
+        self,
+        instrument_id: str | None = None,
+    ) -> list[FillReport]: ...
+    async def request_position_status_reports(
+        self,
+        instrument_id: str | None = None,
+    ) -> list[PositionStatusReport]: ...
+    async def request_quote_ticks(
+        self,
+        instrument_id: InstrumentId,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[QuoteTick]: ...
+    async def request_trade_ticks(
+        self,
+        instrument_id: InstrumentId,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[TradeTick]: ...
+    async def request_bars(
+        self,
+        bar_type: BarType,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Bar]: ...
     async def submit_order(
         self,
         instrument_id: InstrumentId,
@@ -7819,44 +7895,17 @@ class HyperliquidHttpClient:
         post_only: bool = False,
         reduce_only: bool = False,
     ) -> OrderStatusReport: ...
+    async def submit_orders(
+        self,
+        orders: list[Order],
+    ) -> list[OrderStatusReport]: ...
     async def cancel_order(
         self,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId | None = None,
         venue_order_id: VenueOrderId | None = None,
-    ) -> OrderStatusReport: ...
-    async def submit_orders(
-        self,
-        instrument_ids: list[InstrumentId],
-        client_order_ids: list[ClientOrderId],
-        order_sides: list[OrderSide],
-        order_types: list[OrderType],
-        quantities: list[Quantity],
-        time_in_forces: list[TimeInForce],
-        prices: list[Price | None],
-        trigger_prices: list[Price | None],
-        post_onlys: list[bool],
-        reduce_onlys: list[bool],
-    ) -> list[OrderStatusReport]: ...
-    async def get_open_orders(self) -> list[OrderStatusReport]: ...
-    async def get_clearinghouse_state(self) -> dict: ...
-    def cache_instrument(self, instrument: Instrument) -> None: ...
-    def set_account_id(self, account_id: str) -> None: ...
-    def get_user_address(self) -> str: ...
-    async def request_order_status_reports(
-        self,
-        instrument_id: InstrumentId | None = None,
-        open_only: bool = False,
-    ) -> list[OrderStatusReport]: ...
-    async def request_fill_reports(
-        self,
-        instrument_id: InstrumentId | None = None,
-        limit: int | None = None,
-    ) -> list[FillReport]: ...
-    async def request_position_status_reports(
-        self,
-        instrument_id: str | None = None,
-    ) -> list[PositionStatusReport]: ...
+    ) -> None: ...
+    async def request_account_state(self) -> AccountState: ...
 
 class HyperliquidWebSocketClient:
     def __init__(
@@ -7894,6 +7943,7 @@ class HyperliquidWebSocketClient:
     async def subscribe_funding_rates(self, instrument_id: InstrumentId) -> None: ...
     async def subscribe_order_updates(self, user: str) -> None: ...
     async def subscribe_user_events(self, user: str) -> None: ...
+    async def subscribe_user_fills(self, user: str) -> None: ...
     async def unsubscribe_trades(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_book(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_book_deltas(self, instrument_id: InstrumentId) -> None: ...

@@ -349,7 +349,29 @@ impl HyperliquidWebSocketClient {
         Ok(())
     }
 
+    /// Subscribe to user fills for a specific user address.
+    ///
+    /// Note: This channel is redundant with `userEvents` which already includes fills.
+    /// Prefer using `subscribe_user_events` or `subscribe_all_user_channels` instead.
+    pub async fn subscribe_user_fills(&self, user: &str) -> anyhow::Result<()> {
+        let subscription = SubscriptionRequest::UserFills {
+            user: user.to_string(),
+            aggregate_by_time: None,
+        };
+        self.cmd_tx
+            .read()
+            .await
+            .send(HandlerCommand::Subscribe {
+                subscriptions: vec![subscription],
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to send subscribe command: {e}"))?;
+        Ok(())
+    }
+
     /// Subscribe to all user channels (order updates + user events) for convenience.
+    ///
+    /// Note: `userEvents` already includes fills, so we don't subscribe to `userFills`
+    /// separately to avoid duplicate fill messages.
     pub async fn subscribe_all_user_channels(&self, user: &str) -> anyhow::Result<()> {
         self.subscribe_order_updates(user).await?;
         self.subscribe_user_events(user).await?;
