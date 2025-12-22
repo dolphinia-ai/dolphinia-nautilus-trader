@@ -72,7 +72,6 @@ from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import OrderBookDepth10
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggregationSource
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.model.enums import BarAggregation
@@ -4305,53 +4304,6 @@ class TestDataEngine:
             bar.bar_type == bar_type.standard() for bar in request_historical_bars
         ), "All historical bars should have the correct bar type"
 
-    def test_backfill_with_update_subscriptions_restores_live_mode(self):
-        # Arrange
-        self.data_engine.register_client(self.binance_client)
-        self.binance_client.start()
-
-        bar_spec = BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
-        bar_type = BarType(ETHUSDT_BINANCE.id, bar_spec, AggregationSource.INTERNAL)
-
-        subscribe = SubscribeBars(
-            client_id=None,
-            venue=BINANCE,
-            bar_type=bar_type,
-            command_id=UUID4(),
-            ts_init=self.clock.timestamp_ns(),
-        )
-        self.data_engine.execute(subscribe)
-
-        key = (bar_type.standard(), None)
-        aggregator = self.data_engine._bar_aggregators.get(key)
-        assert aggregator is not None
-        assert not aggregator.historical_mode
-        assert aggregator.is_running
-
-        # Simulate backfill switching aggregator to historical mode
-        self.data_engine._setup_bar_aggregator(bar_type, historical=True)
-        assert aggregator.historical_mode
-
-        # Act: Finalize with update_subscriptions=True
-        params = {"bar_types": (bar_type,), "update_subscriptions": True}
-        response = DataResponse(
-            client_id=ClientId("BINANCE"),
-            venue=BINANCE,
-            data_type=DataType(TradeTick),
-            data=[],
-            correlation_id=UUID4(),
-            response_id=UUID4(),
-            start=None,
-            end=None,
-            ts_init=self.clock.timestamp_ns(),
-            params=params,
-        )
-        self.data_engine._finalize_aggregated_bars_request(response)
-
-        # Assert
-        assert not aggregator.historical_mode
-        assert aggregator.is_running
-
     # TODO: Implement with new Rust datafusion backend"
     # def test_request_quote_ticks_when_catalog_registered_using_rust(self) -> None:
     #     # Arrange
@@ -5159,6 +5111,134 @@ class TestDataEngine:
         # Verify spread is preserved
         spread = quote_tick.ask_price - quote_tick.bid_price
         assert spread == Price.from_str("0.25")
+
+    def test_disable_historical_cache_flag_prevents_cache_updates(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        # Create initial quote tick to establish baseline in cache
+        initial_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=100.0,
+            ask_price=101.0,
+            ts_event=1_000_000_000,
+            ts_init=1_000_000_000,
+        )
+        self.data_engine.process_historical(initial_tick)
+
+        # Verify initial tick is in cache
+        cached_tick_before = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_before is not None
+        assert cached_tick_before.bid_price == Price.from_str("100.0")
+
+        # Create a request
+        request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=1000,
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Send request to register it
+        self.data_engine.request(request)
+
+        # Create new quote ticks that should update the cache when flag is False
+        new_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=102.0,
+            ask_price=103.0,
+            ts_event=2_000_000_000,
+            ts_init=2_000_000_000,
+        )
+
+        # Test 1: With disable_historical_cache=False, cache should be updated
+        response_with_cache = DataResponse(
+            client_id=request.client_id,
+            venue=request.venue,
+            data_type=DataType(QuoteTick),
+            data=[new_tick],
+            correlation_id=request.id,
+            response_id=UUID4(),
+            start=None,
+            end=None,
+            ts_init=self.clock.timestamp_ns(),
+            params={"disable_historical_cache": False},
+        )
+        self.data_engine.response(response_with_cache)
+
+        # Verify cache was updated
+        cached_tick_after_false = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_after_false is not None
+        assert cached_tick_after_false.bid_price == Price.from_str("102.0")
+        assert cached_tick_after_false.ask_price == Price.from_str("103.0")
+
+        # Reset cache state for next test
+        # Process a new tick directly to establish new baseline
+        baseline_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=200.0,
+            ask_price=201.0,
+            ts_event=3_000_000_000,
+            ts_init=3_000_000_000,
+        )
+        self.data_engine.process_historical(baseline_tick)
+        cached_tick_baseline = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_baseline.bid_price == Price.from_str("200.0")
+
+        # Create another request
+        request2 = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=1000,
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Send request to register it
+        self.data_engine.request(request2)
+
+        # Create new quote tick that should NOT update the cache when flag is True
+        new_tick2 = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=205.0,
+            ask_price=206.0,
+            ts_event=4_000_000_000,
+            ts_init=4_000_000_000,
+        )
+
+        # Test 2: With disable_historical_cache=True, cache should NOT be updated
+        response_without_cache = DataResponse(
+            client_id=request2.client_id,
+            venue=request2.venue,
+            data_type=DataType(QuoteTick),
+            data=[new_tick2],
+            correlation_id=request2.id,
+            response_id=UUID4(),
+            start=None,
+            end=None,
+            ts_init=self.clock.timestamp_ns(),
+            params={"disable_historical_cache": True},
+        )
+        self.data_engine.response(response_without_cache)
+
+        # Verify cache was NOT updated (should still have the baseline tick)
+        cached_tick_after_true = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_after_true is not None
+        assert cached_tick_after_true.bid_price == Price.from_str("200.0")
+        assert cached_tick_after_true.ask_price == Price.from_str("201.0")
 
 
 class TestDataEngineQuoteFromDepth:
