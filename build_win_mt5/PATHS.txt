@@ -1,0 +1,51 @@
+# NautilusTrader Windows Build Script - Path Configuration
+# 
+# This file contains environment-specific paths for the build script.
+# Paths can use ${PROJECT_ROOT} variable which will be expanded automatically.
+# Lines starting with # are comments and will be ignored.
+#
+# Instructions:
+# 1. Update paths below to match your system configuration
+# 2. Leave paths empty or commented out to use system PATH lookup
+# 3. Use forward slashes or escaped backslashes in paths
+#
+
+# Python executable path (optional - leave empty to use 'python' from PATH)
+# Example: PYTHON_EXE=C:\Python311\python.exe
+# Example: PYTHON_EXE=C:\Users\user\AppData\Local\Programs\Python\Python311\python.exe
+PYTHON_EXE=C:\Python311\python.exe
+
+# UV package manager executable path (optional - leave empty to use 'uv' from PATH)
+# Example: UV_EXE=C:\Users\user\.cargo\bin\uv.exe
+# UV not found in PATH - uncomment and set path if you install uv
+UV_EXE=
+
+# Virtual environment directory (optional - for isolated Python environments)
+# Example: VENV_DIR=${PROJECT_ROOT}\.venv
+VENV_DIR=
+
+# Server script path - Python script that receives and logs trade data from MT5
+# This will be launched when using --launch option
+# Example: SERVER_SCRIPT=${PROJECT_ROOT}\server\mt5_trade_logger.py
+# Uncomment and update when server script is created:
+# SERVER_SCRIPT=${PROJECT_ROOT}\server\mt5_trade_logger.py
+SERVER_SCRIPT=
+
+# Configuration directory (optional - for server configuration files)
+# Example: CONFIG_DIR=${PROJECT_ROOT}\config
+# Uncomment and update when config directory is created:
+# CONFIG_DIR=${PROJECT_ROOT}\config
+CONFIG_DIR=
+
+# Log directory - where server logs will be written
+# Example: LOG_DIR=${PROJECT_ROOT}\logs
+LOG_DIR=${PROJECT_ROOT}\logs
+
+# Dolphinia EA workspace root (for reference, used by MT5 integration)
+# Example: DOLPHINIA_EA_DIR=D:\dolphinia.ai\workspace_mt5\dolphinia-ea
+DOLPHINIA_EA_DIR=D:\dolphinia.ai\workspace_mt5\dolphinia-ea
+
+# MT5 deployment directory (for reference, used by MT5 integration)
+# Example: MT5_DEPLOY_DIR=C:\Users\user\AppData\Roaming\MetaQuotes\Terminal\D79A28ADC586C8DF07C8948351DAFE67\MQL5
+MT5_DEPLOY_DIR=C:\Users\user\AppData\Roaming\MetaQuotes\Terminal\D79A28ADC586C8DF07C8948351DAFE67\MQL5
+
