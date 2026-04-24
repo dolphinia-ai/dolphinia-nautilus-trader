@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -25,16 +25,32 @@ use nautilus_common::{
     logging::log_task_awaiting,
     msgbus::database::{DatabaseConfig, MessageBusConfig},
 };
-use nautilus_core::UUID4;
+use nautilus_core::{UUID4, string::semver::SemVer};
 use nautilus_model::identifiers::TraderId;
 use redis::RedisError;
-use semver::Version;
 
 const REDIS_MIN_VERSION: &str = "6.2.0";
 const REDIS_DELIMITER: char = ':';
+const REDIS_INDEX_PATTERN: &str = ":index:";
 const REDIS_XTRIM: &str = "XTRIM";
 const REDIS_MINID: &str = "MINID";
 const REDIS_FLUSHDB: &str = "FLUSHDB";
+
+/// Extracts the index key from a full Redis key.
+///
+/// Handles keys with instance_id prefix by finding the `:index:` pattern.
+/// e.g., "trader-id:uuid:index:order_position" -> "index:order_position"
+pub(crate) fn get_index_key(key: &str) -> anyhow::Result<&str> {
+    if let Some(pos) = key.find(REDIS_INDEX_PATTERN) {
+        return Ok(&key[pos + 1..]);
+    }
+
+    if key.starts_with("index:") {
+        return Ok(key);
+    }
+
+    anyhow::bail!("Invalid index key format: {key}")
+}
 
 async fn await_handle(handle: Option<tokio::task::JoinHandle<()>>, task_name: &str) {
     if let Some(handle) = handle {
@@ -114,6 +130,7 @@ pub fn get_redis_url(config: DatabaseConfig) -> (String, String) {
 
     (url, redacted_url)
 }
+
 /// Creates a new Redis connection manager based on the provided database `config` and connection name.
 ///
 /// # Errors
@@ -132,9 +149,9 @@ pub async fn create_redis_connection(
     con_name: &str,
     config: DatabaseConfig,
 ) -> anyhow::Result<redis::aio::ConnectionManager> {
-    tracing::debug!("Creating {con_name} redis connection");
+    log::debug!("Creating {con_name} redis connection");
     let (redis_url, redacted_url) = get_redis_url(config.clone());
-    tracing::debug!("Connecting to {redacted_url}");
+    log::debug!("Connecting to {redacted_url}");
 
     let connection_timeout = Duration::from_secs(u64::from(config.connection_timeout));
     let response_timeout = Duration::from_secs(u64::from(config.response_timeout));
@@ -160,14 +177,12 @@ pub async fn create_redis_connection(
         .await?;
 
     let version = get_redis_version(&mut con).await?;
-    let min_version = Version::parse(REDIS_MIN_VERSION)?;
+    let min_version = SemVer::parse(REDIS_MIN_VERSION)?;
     let con_msg = format!("Connected to redis v{version}");
 
     if version >= min_version {
-        tracing::info!(con_msg);
+        log::info!("{con_msg}");
     } else {
-        // TODO: Using `log` error here so that the message is displayed regardless of whether
-        // the logging config has pyo3 enabled. Later we can standardize this to `tracing`.
         log::error!("{con_msg}, but minimum supported version is {REDIS_MIN_VERSION}");
     }
 
@@ -212,14 +227,7 @@ pub fn get_stream_key(
     stream_key
 }
 
-/// Retrieves and parses the Redis server version via the INFO command.
-///
-/// # Errors
-///
-/// Returns an error if the INFO command fails or version parsing fails.
-pub async fn get_redis_version(
-    conn: &mut redis::aio::ConnectionManager,
-) -> anyhow::Result<Version> {
+async fn get_redis_version(conn: &mut redis::aio::ConnectionManager) -> anyhow::Result<SemVer> {
     let info: String = redis::cmd("INFO").query_async(conn).await?;
     let version_str = match info.lines().find_map(|line| {
         if line.starts_with("redis_version:") {
@@ -234,17 +242,7 @@ pub async fn get_redis_version(
         }
     };
 
-    parse_redis_version(&version_str)
-}
-
-fn parse_redis_version(version_str: &str) -> anyhow::Result<Version> {
-    let mut components = version_str.split('.').map(str::parse::<u64>);
-
-    let major = components.next().unwrap_or(Ok(0))?;
-    let minor = components.next().unwrap_or(Ok(0))?;
-    let patch = components.next().unwrap_or(Ok(0))?;
-
-    Ok(Version::new(major, minor, patch))
+    SemVer::parse(&version_str)
 }
 
 #[cfg(test)]
@@ -359,5 +357,29 @@ mod tests {
 
         let key = get_stream_key(trader_id, instance_id, &config);
         assert_eq!(key, format!("stream"));
+    }
+
+    #[rstest]
+    fn test_get_index_key_without_prefix() {
+        let key = "index:order_position";
+        assert_eq!(get_index_key(key).unwrap(), "index:order_position");
+    }
+
+    #[rstest]
+    fn test_get_index_key_with_trader_prefix() {
+        let key = "trader-tester-123:index:order_position";
+        assert_eq!(get_index_key(key).unwrap(), "index:order_position");
+    }
+
+    #[rstest]
+    fn test_get_index_key_with_instance_id() {
+        let key = "trader-tester-123:abc-uuid-123:index:order_position";
+        assert_eq!(get_index_key(key).unwrap(), "index:order_position");
+    }
+
+    #[rstest]
+    fn test_get_index_key_invalid() {
+        let key = "no_index_pattern";
+        assert!(get_index_key(key).is_err());
     }
 }

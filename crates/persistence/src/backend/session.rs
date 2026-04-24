@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,9 +16,9 @@
 use std::{sync::Arc, vec::IntoIter};
 
 use ahash::{AHashMap, AHashSet};
-use compare::Compare;
 use datafusion::{
-    error::Result, logical_expr::expr::Sort, physical_plan::SendableRecordBatchStream, prelude::*,
+    arrow::record_batch::RecordBatch, error::Result, logical_expr::expr::Sort,
+    physical_plan::SendableRecordBatchStream, prelude::*,
 };
 use futures::StreamExt;
 use nautilus_core::{UnixNanos, ffi::cvec::CVec};
@@ -29,7 +29,10 @@ use nautilus_serialization::arrow::{
 use object_store::ObjectStore;
 use url::Url;
 
-use super::kmerge_batch::{EagerStream, ElementBatchIter, KMerge};
+use super::{
+    compare::Compare,
+    kmerge_batch::{EagerStream, ElementBatchIter, KMerge},
+};
 
 #[derive(Debug, Default)]
 pub struct TsInitComparator;
@@ -57,7 +60,11 @@ pub type QueryResult = KMerge<EagerStream<std::vec::IntoIter<Data>>, Data, TsIni
 /// a Vec of data by types that implement [`DecodeDataFromRecordBatch`].
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.persistence")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.persistence", unsendable)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.persistence")
 )]
 pub struct DataBackendSession {
     pub chunk_size: usize,
@@ -139,16 +146,15 @@ impl DataBackendSession {
         Ok(())
     }
 
-    /// Query a file for its records. the caller must specify `T` to indicate
-    /// the kind of data expected from this query.
+    /// Registers a Parquet file and adds a batch stream for decoding.
     ///
-    /// `table_name`: Logical `table_name` assigned to this file. Queries to this file should address the
-    /// file by its table name.
-    /// `file_path`: Path to file
-    /// `sql_query`: A custom sql query to retrieve records from file. If no query is provided a default
-    /// query "SELECT * FROM <`table_name`>" is run.
+    /// The caller must specify `T` to indicate the kind of data expected. `table_name` is
+    /// the logical name for queries; `file_path` is the Parquet path; `sql_query` defaults
+    /// to `SELECT * FROM {table_name} ORDER BY ts_init` if `None`.
     ///
-    /// # Safety
+    /// When `custom_type_name` is `Some`, it is merged into each batch's schema metadata
+    /// before decoding (as `type_name`). Use this for custom data when Parquet/DataFusion
+    /// does not preserve schema metadata so the decoder can look up the type in the registry.
     ///
     /// The file data must be ordered by the `ts_init` in ascending order for this
     /// to work correctly.
@@ -157,9 +163,10 @@ impl DataBackendSession {
         table_name: &str,
         file_path: &str,
         sql_query: Option<&str>,
+        custom_type_name: Option<&str>,
     ) -> Result<()>
     where
-        T: DecodeDataFromRecordBatch + Into<Data>,
+        T: DecodeDataFromRecordBatch,
     {
         // Check if table is already registered to avoid duplicates
         let is_new_table = !self.registered_tables.contains(table_name);
@@ -188,20 +195,69 @@ impl DataBackendSession {
             let sql_query = sql_query.unwrap_or(&default_query);
             let query = self.runtime.block_on(self.session_ctx.sql(sql_query))?;
             let batch_stream = self.runtime.block_on(query.execute_stream())?;
-            self.add_batch_stream::<T>(batch_stream);
+            self.add_batch_stream::<T>(batch_stream, custom_type_name.map(String::from));
         }
 
         Ok(())
     }
 
-    fn add_batch_stream<T>(&mut self, stream: SendableRecordBatchStream)
-    where
-        T: DecodeDataFromRecordBatch + Into<Data>,
+    /// Registers a Parquet file and executes a query, returning the raw record batches.
+    pub fn collect_query_batches(
+        &mut self,
+        table_name: &str,
+        file_path: &str,
+        sql_query: Option<&str>,
+    ) -> Result<Vec<RecordBatch>> {
+        if !self.registered_tables.contains(table_name) {
+            let parquet_options = ParquetReadOptions::<'_> {
+                skip_metadata: Some(false),
+                file_sort_order: vec![vec![Sort {
+                    expr: col("ts_init"),
+                    asc: true,
+                    nulls_first: false,
+                }]],
+                ..Default::default()
+            };
+            self.runtime.block_on(self.session_ctx.register_parquet(
+                table_name,
+                file_path,
+                parquet_options,
+            ))?;
+
+            self.registered_tables.insert(table_name.to_string());
+        }
+
+        let default_query = format!("SELECT * FROM {table_name} ORDER BY ts_init");
+        let sql_query = sql_query.unwrap_or(&default_query);
+        let query = self.runtime.block_on(self.session_ctx.sql(sql_query))?;
+        let mut batch_stream = self.runtime.block_on(query.execute_stream())?;
+
+        self.runtime.block_on(async {
+            let mut batches = Vec::new();
+            while let Some(batch) = batch_stream.next().await {
+                batches.push(batch?);
+            }
+            Ok::<_, datafusion::error::DataFusionError>(batches)
+        })
+    }
+
+    fn add_batch_stream<T>(
+        &mut self,
+        stream: SendableRecordBatchStream,
+        custom_type_name: Option<String>,
+    ) where
+        T: DecodeDataFromRecordBatch,
     {
-        let transform = stream.map(|result| match result {
-            Ok(batch) => T::decode_data_batch(batch.schema().metadata(), batch)
-                .unwrap()
-                .into_iter(),
+        let transform = stream.map(move |result| match result {
+            Ok(batch) => {
+                let mut metadata: std::collections::HashMap<String, String> =
+                    batch.schema().metadata().clone();
+
+                if let Some(ref tn) = custom_type_name {
+                    metadata.insert("type_name".to_string(), tn.clone());
+                }
+                T::decode_data_batch(&metadata, batch).unwrap().into_iter()
+            }
             Err(e) => panic!("Error getting next batch from RecordBatchStream: {e}"),
         });
 
@@ -241,12 +297,6 @@ impl DataBackendSession {
         self.session_ctx = SessionContext::new_with_config(session_cfg);
     }
 }
-
-// SAFETY: DataBackendSession contains non-Send types but implements Send to satisfy
-// PyO3 trait bounds. It must only be used on a single Python thread.
-// WARNING: Actually sending this type across threads is undefined behavior.
-#[allow(unsafe_code)]
-unsafe impl Send for DataBackendSession {}
 
 #[must_use]
 pub fn build_query(
@@ -290,6 +340,10 @@ pub fn build_query(
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.persistence", unsendable)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.persistence")
 )]
 pub struct DataQueryResult {
     pub chunk: Option<CVec>,
@@ -335,6 +389,8 @@ impl DataQueryResult {
                 "drop_chunk: null ptr with non-zero len ({len}) - memory corruption"
             );
 
+            // SAFETY: `ptr`, `len`, and `cap` originate from a valid `CVec` and the
+            // assertions above verify the invariants required by `Vec::from_raw_parts`.
             let data: Vec<Data> = unsafe { Vec::from_raw_parts(ptr.cast::<Data>(), len, cap) };
             drop(data);
         }
@@ -366,9 +422,3 @@ impl Drop for DataQueryResult {
         self.result.clear();
     }
 }
-
-// SAFETY: DataQueryResult contains non-Send types but implements Send to satisfy
-// PyO3 trait bounds. It must only be used on a single Python thread.
-// WARNING: Actually sending this type across threads is undefined behavior.
-#[allow(unsafe_code)]
-unsafe impl Send for DataQueryResult {}

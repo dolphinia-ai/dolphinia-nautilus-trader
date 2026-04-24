@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -20,6 +20,7 @@ from libc.stdint cimport uint64_t
 from nautilus_trader.core.correctness cimport Condition
 from nautilus_trader.core.rust.model cimport BookType
 from nautilus_trader.core.rust.model cimport OrderSide
+from nautilus_trader.core.rust.model cimport OrderType
 from nautilus_trader.model.book cimport BookOrder
 from nautilus_trader.model.book cimport OrderBook
 from nautilus_trader.model.functions cimport liquidity_side_to_str
@@ -39,8 +40,6 @@ cdef class FillModel:
     ----------
     prob_fill_on_limit : double
         The probability of limit order filling if the market rests on its price.
-    prob_fill_on_stop : double
-        The probability of stop orders filling if the market rests on its price.
     prob_slippage : double
         The probability of order fill prices slipping by one tick.
     random_seed : int, optional
@@ -59,7 +58,6 @@ cdef class FillModel:
     def __init__(
         self,
         double prob_fill_on_limit = 1.0,
-        double prob_fill_on_stop = 1.0,
         double prob_slippage = 0.0,
         random_seed: int | None = None,
         config = None,
@@ -67,12 +65,10 @@ cdef class FillModel:
         if config is not None:
             # Initialize from config
             prob_fill_on_limit = config.prob_fill_on_limit
-            prob_fill_on_stop = config.prob_fill_on_stop
             prob_slippage = config.prob_slippage
             random_seed = config.random_seed
 
         Condition.in_range(prob_fill_on_limit, 0.0, 1.0, "prob_fill_on_limit")
-        Condition.in_range(prob_fill_on_stop, 0.0, 1.0, "prob_fill_on_stop")
         Condition.in_range(prob_slippage, 0.0, 1.0, "prob_slippage")
         if random_seed is not None:
             Condition.type(random_seed, int, "random_seed")
@@ -81,8 +77,25 @@ cdef class FillModel:
             random.seed()
 
         self.prob_fill_on_limit = prob_fill_on_limit
-        self.prob_fill_on_stop = prob_fill_on_stop
         self.prob_slippage = prob_slippage
+
+    cpdef bint fill_limit_inside_spread(self):
+        """
+        Return whether limit orders at or inside the spread are fillable.
+
+        When True, the matching core treats a limit order as fillable if its
+        price is at or better than the current best quote on its own side
+        (BUY >= bid, SELL <= ask), not just when it crosses the spread.
+
+        Override to return True in fill models that provide simulated
+        liquidity inside the spread (e.g. best bid/ask).
+
+        Returns
+        -------
+        bool
+
+        """
+        return False
 
     cpdef bint is_limit_filled(self):
         """
@@ -94,17 +107,6 @@ cdef class FillModel:
 
         """
         return self._event_success(self.prob_fill_on_limit)
-
-    cpdef bint is_stop_filled(self):
-        """
-        Return a value indicating whether a ``STOP-MARKET`` order filled.
-
-        Returns
-        -------
-        bool
-
-        """
-        return self._event_success(self.prob_fill_on_stop)
 
     cpdef bint is_slipped(self):
         """
@@ -174,6 +176,9 @@ cdef class BestPriceFillModel(FillModel):
 
     """
 
+    cpdef bint fill_limit_inside_spread(self):
+        return True
+
     cpdef OrderBook get_orderbook_for_fill_simulation(
         self,
         Instrument instrument,
@@ -183,6 +188,7 @@ cdef class BestPriceFillModel(FillModel):
     ):
         """
         Return OrderBook with unlimited liquidity at best prices.
+        Also allows execution inside the bid ask
         """
         cdef:
             uint64_t UNLIMITED = 1_000_000  # Large enough to fill any order
@@ -195,16 +201,36 @@ cdef class BestPriceFillModel(FillModel):
             book_type=BookType.L2_MBP,
         )
 
-        # Add unlimited volume at best prices
+        cdef Price bid_price = best_bid
+        cdef Price ask_price = best_ask
+
+        if order.order_type == OrderType.LIMIT:
+            if order.side == OrderSide.BUY:
+                # BUY order matchable if price >= bid (within or above spread)
+                if order.price >= best_ask:
+                    pass  # Aggressive: use best_ask for price improvement
+                elif order.price >= best_bid:
+                    ask_price = order.price  # Within spread: optimistic fill at order price
+                else:
+                    return None  # Passive: not matchable
+            elif order.side == OrderSide.SELL:
+                # SELL order matchable if price <= ask (within or below spread)
+                if order.price <= best_bid:
+                    pass  # Aggressive: use best_bid for price improvement
+                elif order.price <= best_ask:
+                    bid_price = order.price  # Within spread: optimistic fill at order price
+                else:
+                    return None  # Passive: not matchable
+
         bid_order = BookOrder(
             side=OrderSide.BUY,
-            price=best_bid,
+            price=bid_price,
             size=Quantity(UNLIMITED, instrument.size_precision),
             order_id=1,
         )
         ask_order = BookOrder(
             side=OrderSide.SELL,
-            price=best_ask,
+            price=ask_price,
             size=Quantity(UNLIMITED, instrument.size_precision),
             order_id=2,
         )
@@ -669,11 +695,10 @@ cdef class MarketHoursFillModel(FillModel):
     def __init__(
         self,
         double prob_fill_on_limit = 1.0,
-        double prob_fill_on_stop = 1.0,
         double prob_slippage = 0.0,
         random_seed = None,
     ):
-        super().__init__(prob_fill_on_limit, prob_fill_on_stop, prob_slippage, random_seed)
+        super().__init__(prob_fill_on_limit, prob_slippage, random_seed)
         # In a real implementation, you would track market hours
         self._is_low_liquidity = False  # Simplified for example
 
@@ -760,11 +785,10 @@ cdef class VolumeSensitiveFillModel(FillModel):
     def __init__(
         self,
         double prob_fill_on_limit = 1.0,
-        double prob_fill_on_stop = 1.0,
         double prob_slippage = 0.0,
         random_seed = None,
     ):
-        super().__init__(prob_fill_on_limit, prob_fill_on_stop, prob_slippage, random_seed)
+        super().__init__(prob_fill_on_limit, prob_slippage, random_seed)
         self._recent_volume = 1000.0  # Default volume for demo
 
     cpdef void set_recent_volume(self, double volume):
@@ -847,12 +871,11 @@ cdef class CompetitionAwareFillModel(FillModel):
     def __init__(
         self,
         double prob_fill_on_limit = 1.0,
-        double prob_fill_on_stop = 1.0,
         double prob_slippage = 0.0,
         random_seed = None,
         double liquidity_factor = 0.3,
     ):
-        super().__init__(prob_fill_on_limit, prob_fill_on_stop, prob_slippage, random_seed)
+        super().__init__(prob_fill_on_limit, prob_slippage, random_seed)
         self.liquidity_factor = liquidity_factor
 
     cpdef OrderBook get_orderbook_for_fill_simulation(

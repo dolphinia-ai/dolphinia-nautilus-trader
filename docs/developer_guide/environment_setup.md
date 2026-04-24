@@ -4,13 +4,13 @@ For development we recommend using the PyCharm *Professional* edition IDE, as it
 
 [uv](https://docs.astral.sh/uv) is the preferred tool for handling all Python virtual environments and dependencies.
 
-[pre-commit](https://pre-commit.com/) is used to automatically run various checks, auto-formatters and linting tools at commit.
+[prek](https://github.com/j178/prek) is used to automatically run various pre-commit checks, auto-formatters and linting tools at commit.
 
 NautilusTrader uses increasingly more [Rust](https://www.rust-lang.org), so Rust should be installed on your system as well
 ([installation guide](https://www.rust-lang.org/tools/install)).
 
 [Cap'n Proto](https://capnproto.org/) is required for serialization schema compilation. The required
-version is specified in the `capnp-version` file in the repository root. Ubuntu's default package
+version is specified in `tools.toml` in the repository root. Ubuntu's default package
 is typically too old, so you may need to install from source (see below).
 
 :::info
@@ -22,15 +22,15 @@ mind (use `std::path::Path`, avoid Bash-isms in shell scripts, etc.).
 
 The following steps are for UNIX-like systems, and only need to be completed once.
 
-1. Follow the [installation guide](../getting_started/installation.md) to set up the project with a modification to the final command to install development and test dependencies:
+### 1. Install dependencies
 
-```bash
+Follow the [installation guide](../getting_started/installation.md) to set up the project with a modification to the final command to install development and test dependencies:
+
+```bash tab="uv"
 uv sync --active --all-groups --all-extras
 ```
 
-or
-
-```bash
+```bash tab="make"
 make install
 ```
 
@@ -41,10 +41,60 @@ To install in debug mode, use:
 make install-debug
 ```
 
-2. Set up the pre-commit hook which will then run automatically at commit:
+### 2. Install development tools
+
+NautilusTrader pins every development tool so that all contributors and CI run identical versions.
+A single Makefile target installs the full set:
 
 ```bash
-pre-commit install
+make install-tools
+```
+
+This installs:
+
+- **Cargo CLIs** pinned in `Cargo.toml` under `[workspace.metadata.tools]`: `cargo-audit`,
+  `cargo-deny`, `cargo-edit`, `cargo-llvm-cov`, `cargo-machete`, `cargo-nextest`, `cargo-vet`,
+  `lychee`.
+- **Prebuilt binaries** pinned in `tools.toml`: `prek` (pre-commit runner) and `osv-scanner`
+  (vulnerability scanner).
+- **uv**, synced to the version required by `pyproject.toml`.
+
+Cap'n Proto is also pinned in `tools.toml` but installs separately; see the [Cap'n Proto](#capn-proto)
+section below.
+
+#### One-off prerequisite: cargo-binstall
+
+`make install-tools` uses [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) to fetch
+`prek` as a prebuilt binary instead of compiling it from source. Install `cargo-binstall` once per
+machine:
+
+```bash
+cargo install cargo-binstall --locked
+```
+
+This is a one-time step. Subsequent runs of `make install-tools` reuse the installed `cargo-binstall`.
+
+#### Single source of truth for versions
+
+Tool versions live in two files:
+
+- `Cargo.toml` under `[workspace.metadata.tools]` for cargo-installable crates.
+- `tools.toml` for everything else (`prek`, `osv-scanner`, `capnp`).
+
+The Makefile reads these via `scripts/cargo-tool-version.sh` and `scripts/tool-version.sh`, so
+bumping a version in the source file is the only change required. To check the pinned cargo tool
+versions against crates.io, run:
+
+```bash
+make outdated
+```
+
+### 3. Set up pre-commit
+
+Set up the pre-commit hook which will then run automatically at commit:
+
+```bash
+prek install
 ```
 
 Before opening a pull-request run the formatting and lint suite locally so that CI passes on the
@@ -55,9 +105,11 @@ make format
 make pre-commit
 ```
 
-Make sure the Rust compiler reports **zero errors** – broken builds slow everyone down.
+Make sure the Rust compiler reports **zero errors** -- broken builds slow everyone down.
 
-3. **Required for Rust/PyO3 (Linux and macOS)**: When using Python installed via `uv` on Linux or macOS, set the following environment variables:
+### 4. Configure environment variables
+
+**Required for Rust/PyO3 (Linux and macOS)**: When using Python installed via `uv` on Linux or macOS, set the following environment variables:
 
 ```bash
 # Add to your shell configuration (e.g., ~/.zshrc or ~/.bashrc)
@@ -89,17 +141,47 @@ echo "PYO3_PYTHON: $PYO3_PYTHON"
 echo "PYTHONHOME: $PYTHONHOME"
 ```
 
+## Dependency management
+
+Python dependencies are managed by [uv](https://docs.astral.sh/uv). The `[tool.uv]` section in
+`pyproject.toml` enforces two supply chain safety settings:
+
+- **`required-version = "==0.11.2"`**: all developers and CI use the same uv version. The version
+  is extracted by `scripts/uv-version.sh` for Makefile, CI, and Docker builds.
+- **`exclude-newer = "3 days"`**: `uv lock` ignores package versions published within the last
+  3 days. This gives the community time to detect and quarantine compromised releases before they
+  enter the lockfile.
+
+### Bypassing the cooldown
+
+When a security patch or critical bug fix must be pulled in immediately, override `exclude-newer`
+on the command line:
+
+```bash
+# Disable the cooldown for a single package
+uv lock --exclude-newer-package "somepackage=2026-03-30T00:00:00Z"
+
+# Disable the cooldown entirely for this resolution
+uv lock --exclude-newer "0 seconds"
+```
+
+The CLI flag overrides the `pyproject.toml` value for that invocation only. The config remains
+unchanged for subsequent runs.
+
+### Updating uv
+
+To update the pinned uv version, change `required-version` in both `pyproject.toml` and
+`python/pyproject.toml`, then update the `rev` in `.pre-commit-config.yaml` to match.
+
 ## Builds
 
 Following any changes to `.rs`, `.pyx` or `.pxd` files, you can re-compile by running:
 
-```bash
+```bash tab="uv"
 uv run --no-sync python build.py
 ```
 
-or
-
-```bash
+```bash tab="make"
 make build
 ```
 
@@ -113,21 +195,20 @@ make build-debug
 ## Cap'n Proto
 
 [Cap'n Proto](https://capnproto.org/) is required for serialization schema compilation.
-The required version is defined in the `capnp-version` file in the repository root.
+The required version is defined in `tools.toml` in the repository root.
 
-On **macOS**, install via Homebrew:
+Install the correct version for your platform:
 
-```bash
+```bash tab="Script (Linux/macOS)"
+./scripts/install-capnp.sh
+```
+
+```bash tab="macOS (Homebrew)"
 brew install capnp
 ```
 
-Verify the installed version matches `capnp-version`. If Homebrew provides an older version,
-install from source using the Linux instructions below.
-
-On **Ubuntu/Linux**, the default package is typically too old. Install from source:
-
-```bash
-CAPNP_VERSION=$(cat capnp-version)
+```bash tab="Linux (source)"
+CAPNP_VERSION=$(bash scripts/tool-version.sh capnp)
 cd ~
 wget https://capnproto.org/capnproto-c++-${CAPNP_VERSION}.tar.gz
 tar xzf capnproto-c++-${CAPNP_VERSION}.tar.gz
@@ -138,21 +219,19 @@ sudo make install
 sudo ldconfig
 ```
 
-Verify installation:
+```bash tab="Windows (Chocolatey)"
+choco install capnproto
+```
+
+Verify the installed version matches `tools.toml`:
 
 ```bash
 capnp --version
 ```
 
-On **Windows**, install via Chocolatey:
-
-```bash
-choco install capnproto
-```
-
-Verify the installed version matches `capnp-version`. If Chocolatey provides an older version,
-see the [Cap'n Proto installation guide](https://capnproto.org/install.html) for alternative
-installation methods.
+The install script ensures the pinned version is installed. If Homebrew or Chocolatey provides
+an older version, install from source or see the
+[Cap'n Proto installation guide](https://capnproto.org/install.html).
 
 ## Faster builds
 
@@ -226,7 +305,7 @@ docker-compose up -d postgres
 
 Used services are:
 
-- `postgres`: Postgres database with root user `POSTRES_USER` which defaults to `postgres`, `POSTGRES_PASSWORD` which defaults to `pass` and `POSTGRES_DB` which defaults to `postgres`.
+- `postgres`: Postgres database with root user `POSTGRES_USER` which defaults to `postgres`, `POSTGRES_PASSWORD` which defaults to `pass` and `POSTGRES_DB` which defaults to `postgres`.
 - `redis`: Redis server.
 - `pgadmin`: PgAdmin4 for database management and administration.
 
@@ -275,7 +354,7 @@ The Nautilus CLI command is only supported on UNIX-like systems.
 
 ## Install
 
-You can install the Nautilus CLI using the below Makefile target, which leverages `cargo install` under the hood.
+You can install the Nautilus CLI using the below Makefile target, which uses `cargo install` under the hood.
 This will place the nautilus binary in your system's PATH, assuming Rust's `cargo` is properly configured.
 
 ```bash
@@ -318,11 +397,8 @@ List of commands are:
 
 Rust analyzer is a popular language server for Rust and has integrations for many IDEs. It is recommended to configure rust analyzer to have same environment variables as `make build-debug` for faster compile times. Below tested configurations for VSCode and Astro Nvim are provided. For more information see [PR](https://github.com/nautechsystems/nautilus_trader/pull/2524) or rust analyzer [config docs](https://rust-analyzer.github.io/book/configuration.html).
 
-### VSCode
-
-You can add the following settings to your VSCode `settings.json` file:
-
-```
+```json tab="VSCode"
+{
     "rust-analyzer.restartServerOnConfigChange": true,
     "rust-analyzer.linkedProjects": [
         "Cargo.toml"
@@ -346,46 +422,44 @@ You can add the following settings to your VSCode `settings.json` file:
     },
     "rust-analyzer.check.features": "all",
     "rust-analyzer.testExplorer": true
+}
 ```
 
-### Astro Nvim (Neovim + AstroLSP)
-
-You can add the following to your astro lsp config file:
-
-```
-    config = {
-      rust_analyzer = {
-        settings = {
-          ["rust-analyzer"] = {
-            restartServerOnConfigChange = true,
-            linkedProjects = { "Cargo.toml" },
-            cargo = {
-              features = "all",
-              extraEnv = {
-                VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
-                CC = "clang",
-                CXX = "clang++",
-              },
-            },
-            check = {
-              workspace = false,
-              command = "check",
-              features = "all",
-              extraEnv = {
-                VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
-                CC = "clang",
-                CXX = "clang++",
-              },
-            },
-            runnables = {
-              extraEnv = {
-                VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
-                CC = "clang",
-                CXX = "clang++",
-              },
-            },
-            testExplorer = true,
+```lua tab="Neovim (AstroLSP)"
+config = {
+  rust_analyzer = {
+    settings = {
+      ["rust-analyzer"] = {
+        restartServerOnConfigChange = true,
+        linkedProjects = { "Cargo.toml" },
+        cargo = {
+          features = "all",
+          extraEnv = {
+            VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
+            CC = "clang",
+            CXX = "clang++",
           },
         },
+        check = {
+          workspace = false,
+          command = "check",
+          features = "all",
+          extraEnv = {
+            VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
+            CC = "clang",
+            CXX = "clang++",
+          },
+        },
+        runnables = {
+          extraEnv = {
+            VIRTUAL_ENV = "<path-to-your-virtual-environment>/.venv",
+            CC = "clang",
+            CXX = "clang++",
+          },
+        },
+        testExplorer = true,
       },
+    },
+  },
+}
 ```

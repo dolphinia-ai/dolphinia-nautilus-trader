@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyvalue_err};
+use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyruntime_err, to_pyvalue_err};
 use pyo3::{basic::CompareOp, prelude::*, types::PyDict};
 
 use crate::{
@@ -27,9 +27,12 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl CashAccount {
+    /// Creates a new `CashAccount` instance.
     #[new]
     #[pyo3(signature = (event, calculate_account_state, allow_borrowing = false))]
+    #[must_use]
     pub fn py_new(
         event: AccountState,
         calculate_account_state: bool,
@@ -44,11 +47,6 @@ impl CashAccount {
             CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
             _ => py.NotImplemented(),
         }
-    }
-
-    #[getter]
-    fn id(&self) -> AccountId {
-        self.id
     }
 
     #[getter]
@@ -144,8 +142,8 @@ impl CashAccount {
     }
 
     #[pyo3(name = "apply")]
-    fn py_apply(&mut self, event: AccountState) {
-        self.apply(event);
+    fn py_apply(&mut self, event: AccountState) -> PyResult<()> {
+        self.apply(event).map_err(to_pyruntime_err)
     }
 
     #[pyo3(name = "calculate_balance_locked")]
@@ -160,7 +158,7 @@ impl CashAccount {
         py: Python,
     ) -> PyResult<Money> {
         let instrument = pyobject_to_instrument_any(py, instrument)?;
-        self.calculate_balance_locked(instrument, side, quantity, price, use_quote_for_inverse)
+        self.calculate_balance_locked(&instrument, side, quantity, price, use_quote_for_inverse)
             .map_err(to_pyvalue_err)
     }
 
@@ -180,7 +178,7 @@ impl CashAccount {
         }
         let instrument = pyobject_to_instrument_any(py, instrument)?;
         self.calculate_commission(
-            instrument,
+            &instrument,
             last_qty,
             last_px,
             liquidity_side,
@@ -199,7 +197,7 @@ impl CashAccount {
         py: Python,
     ) -> PyResult<Vec<Money>> {
         let instrument = pyobject_to_instrument_any(py, instrument)?;
-        self.calculate_pnls(instrument, fill, position)
+        self.calculate_pnls(&instrument, &fill, position)
             .map_err(to_pyvalue_err)
     }
 

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -19,7 +19,10 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use nautilus_core::{UUID4, UnixNanos, correctness::FAILED};
+use nautilus_core::{
+    UUID4, UnixNanos,
+    correctness::{CorrectnessError, FAILED},
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
@@ -42,7 +45,11 @@ use crate::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct LimitIfTouchedOrder {
     pub price: Price,
@@ -57,7 +64,6 @@ pub struct LimitIfTouchedOrder {
     core: OrderCore,
 }
 
-#[allow(clippy::too_many_arguments)]
 impl LimitIfTouchedOrder {
     /// Creates a new [`LimitIfTouchedOrder`] instance.
     ///
@@ -67,7 +73,7 @@ impl LimitIfTouchedOrder {
     /// - The `quantity` is not positive.
     /// - The `display_qty` (when provided) exceeds `quantity`.
     /// - The `time_in_force` is GTD and the `expire_time` is `None` or zero.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new_checked(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -96,17 +102,25 @@ impl LimitIfTouchedOrder {
         tags: Option<Vec<Ustr>>,
         init_id: UUID4,
         ts_init: UnixNanos,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, OrderError> {
         check_positive_quantity(quantity, stringify!(quantity))?;
         check_display_qty(display_qty, quantity)?;
         check_time_in_force(time_in_force, expire_time)?;
 
         match order_side {
             OrderSide::Buy if trigger_price > price => {
-                anyhow::bail!("BUY Limit-If-Touched must have `trigger_price` <= `price`")
+                return Err(CorrectnessError::PredicateViolation {
+                    message: "BUY Limit-If-Touched must have `trigger_price` <= `price`"
+                        .to_string(),
+                }
+                .into());
             }
             OrderSide::Sell if trigger_price < price => {
-                anyhow::bail!("SELL Limit-If-Touched must have `trigger_price` >= `price`")
+                return Err(CorrectnessError::PredicateViolation {
+                    message: "SELL Limit-If-Touched must have `trigger_price` >= `price`"
+                        .to_string(),
+                }
+                .into());
             }
             _ => {}
         }
@@ -166,7 +180,8 @@ impl LimitIfTouchedOrder {
     /// # Panics
     ///
     /// Panics if any order validation fails (see [`LimitIfTouchedOrder::new_checked`]).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -225,7 +240,13 @@ impl LimitIfTouchedOrder {
             init_id,
             ts_init,
         )
-        .expect(FAILED)
+        .unwrap_or_else(|e| panic!("{FAILED}: {e}"))
+    }
+}
+
+impl PartialEq for LimitIfTouchedOrder {
+    fn eq(&self, other: &Self) -> bool {
+        self.client_order_id == other.client_order_id
     }
 }
 
@@ -461,10 +482,6 @@ impl Order for LimitIfTouchedOrder {
     }
 
     fn apply(&mut self, event: OrderEventAny) -> Result<(), OrderError> {
-        if let OrderEventAny::Updated(ref event) = event {
-            self.update(event);
-        };
-
         let is_order_filled = matches!(event, OrderEventAny::Filled(_));
         let is_order_triggered = matches!(event, OrderEventAny::Triggered(_));
         let ts_event = if is_order_triggered {
@@ -473,7 +490,11 @@ impl Order for LimitIfTouchedOrder {
             None
         };
 
-        self.core.apply(event)?;
+        self.core.apply(event.clone())?;
+
+        if let OrderEventAny::Updated(ref event) = event {
+            self.update(event);
+        }
 
         if is_order_triggered {
             self.is_triggered = true;
@@ -482,7 +503,7 @@ impl Order for LimitIfTouchedOrder {
 
         if is_order_filled {
             self.core.set_slippage(self.price);
-        };
+        }
 
         Ok(())
     }
@@ -611,9 +632,9 @@ mod tests {
     };
 
     #[rstest]
-    fn test_initialize(_audusd_sim: CurrencyPair) {
+    fn test_initialize(audusd_sim: CurrencyPair) {
         let order = OrderTestBuilder::new(OrderType::LimitIfTouched)
-            .instrument_id(_audusd_sim.id)
+            .instrument_id(audusd_sim.id)
             .side(OrderSide::Buy)
             .price(Price::from("0.68000"))
             .trigger_price(Price::from("0.68000"))
@@ -684,7 +705,7 @@ mod tests {
     #[rstest]
     #[should_panic(expected = "BUY Limit-If-Touched must have `trigger_price` <= `price`")]
     fn test_buy_trigger_gt_price(audusd_sim: CurrencyPair) {
-        OrderTestBuilder::new(OrderType::LimitIfTouched)
+        let _ = OrderTestBuilder::new(OrderType::LimitIfTouched)
             .instrument_id(audusd_sim.id)
             .side(OrderSide::Buy)
             .trigger_price(Price::from("30300")) // Invalid trigger > price
@@ -697,7 +718,7 @@ mod tests {
     #[rstest]
     #[should_panic(expected = "SELL Limit-If-Touched must have `trigger_price` >= `price`")]
     fn test_sell_trigger_lt_price(audusd_sim: CurrencyPair) {
-        OrderTestBuilder::new(OrderType::LimitIfTouched)
+        let _ = OrderTestBuilder::new(OrderType::LimitIfTouched)
             .instrument_id(audusd_sim.id)
             .side(OrderSide::Sell)
             .trigger_price(Price::from("30100")) // Invalid trigger < price

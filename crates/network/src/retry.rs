@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,12 +17,14 @@
 
 use std::{future::Future, marker::PhantomData, time::Duration};
 
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::backoff::ExponentialBackoff;
+use crate::{backoff::ExponentialBackoff, dst};
 
 /// Configuration for retry behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (total attempts = 1 initial + `max_retries`).
     pub max_retries: u32,
@@ -74,6 +76,7 @@ where
     E: std::error::Error,
 {
     /// Creates a new retry manager with the given configuration.
+    #[must_use]
     pub const fn new(config: RetryConfig) -> Self {
         Self {
             config,
@@ -126,17 +129,13 @@ where
         .map_err(|e| create_error(format!("Invalid configuration: {e}")))?;
 
         let mut attempt = 0;
-        let start_time = tokio::time::Instant::now();
+        let start_time = dst::time::Instant::now();
 
         loop {
             if let Some(token) = cancel
                 && token.is_cancelled()
             {
-                tracing::debug!(
-                    operation = %operation_name,
-                    attempts = attempt,
-                    "Operation canceled"
-                );
+                log::debug!("Operation '{operation_name}' canceled after {attempt} attempts");
                 return Err(create_error("canceled".to_string()));
             }
 
@@ -150,27 +149,23 @@ where
             let result = match (self.config.operation_timeout_ms, cancel) {
                 (Some(timeout_ms), Some(token)) => {
                     tokio::select! {
-                        result = tokio::time::timeout(Duration::from_millis(timeout_ms), operation()) => result,
+                        biased;
+                        result = dst::time::timeout(Duration::from_millis(timeout_ms), operation()) => result,
                         () = token.cancelled() => {
-                            tracing::debug!(
-                                operation = %operation_name,
-                                "Operation canceled during execution"
-                            );
+                            log::debug!("Operation '{operation_name}' canceled during execution");
                             return Err(create_error("canceled".to_string()));
                         }
                     }
                 }
                 (Some(timeout_ms), None) => {
-                    tokio::time::timeout(Duration::from_millis(timeout_ms), operation()).await
+                    dst::time::timeout(Duration::from_millis(timeout_ms), operation()).await
                 }
                 (None, Some(token)) => {
                     tokio::select! {
+                        biased;
                         result = operation() => Ok(result),
                         () = token.cancelled() => {
-                            tracing::debug!(
-                                operation = %operation_name,
-                                "Operation canceled during execution"
-                            );
+                            log::debug!("Operation '{operation_name}' canceled during execution");
                             return Err(create_error("canceled".to_string()));
                         }
                     }
@@ -181,30 +176,23 @@ where
             match result {
                 Ok(Ok(success)) => {
                     if attempt > 0 {
-                        tracing::trace!(
-                            operation = %operation_name,
-                            attempts = attempt + 1,
-                            "Retry succeeded"
+                        log::trace!(
+                            "Operation '{operation_name}' succeeded after {} attempts",
+                            attempt + 1
                         );
                     }
                     return Ok(success);
                 }
                 Ok(Err(e)) => {
                     if !should_retry(&e) {
-                        tracing::trace!(
-                            operation = %operation_name,
-                            error = %e,
-                            "Non-retryable error"
-                        );
+                        log::trace!("Operation '{operation_name}' non-retryable error: {e}");
                         return Err(e);
                     }
 
                     if attempt >= self.config.max_retries {
-                        tracing::trace!(
-                            operation = %operation_name,
-                            attempts = attempt + 1,
-                            error = %e,
-                            "Retries exhausted"
+                        log::trace!(
+                            "Operation '{operation_name}' retries exhausted after {} attempts: {e}",
+                            attempt + 1
                         );
                         return Err(e);
                     }
@@ -223,12 +211,10 @@ where
                         delay = delay.min(remaining);
                     }
 
-                    tracing::trace!(
-                        operation = %operation_name,
-                        attempt = attempt + 1,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %e,
-                        "Retrying after failure"
+                    log::trace!(
+                        "Operation '{operation_name}' attempt {} failed, retrying in {}ms: {e}",
+                        attempt + 1,
+                        delay.as_millis()
                     );
 
                     // Yield even on zero-delay to avoid busy-wait loop
@@ -240,18 +226,15 @@ where
 
                     if let Some(token) = cancel {
                         tokio::select! {
-                            () = tokio::time::sleep(delay) => {},
+                            biased;
+                            () = dst::time::sleep(delay) => {},
                             () = token.cancelled() => {
-                                tracing::debug!(
-                                    operation = %operation_name,
-                                    attempt = attempt + 1,
-                                    "Operation canceled during retry delay"
-                                );
+                                log::debug!("Operation '{operation_name}' canceled during retry delay (attempt {})", attempt + 1);
                                 return Err(create_error("canceled".to_string()));
                             }
                         }
                     } else {
-                        tokio::time::sleep(delay).await;
+                        dst::time::sleep(delay).await;
                     }
                     attempt += 1;
                 }
@@ -262,20 +245,14 @@ where
                     ));
 
                     if !should_retry(&e) {
-                        tracing::trace!(
-                            operation = %operation_name,
-                            error = %e,
-                            "Non-retryable timeout"
-                        );
+                        log::trace!("Operation '{operation_name}' non-retryable timeout: {e}");
                         return Err(e);
                     }
 
                     if attempt >= self.config.max_retries {
-                        tracing::trace!(
-                            operation = %operation_name,
-                            attempts = attempt + 1,
-                            error = %e,
-                            "Retries exhausted after timeout"
+                        log::trace!(
+                            "Operation '{operation_name}' retries exhausted after timeout ({} attempts): {e}",
+                            attempt + 1
                         );
                         return Err(e);
                     }
@@ -294,12 +271,10 @@ where
                         delay = delay.min(remaining);
                     }
 
-                    tracing::trace!(
-                        operation = %operation_name,
-                        attempt = attempt + 1,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %e,
-                        "Retrying after timeout"
+                    log::trace!(
+                        "Operation '{operation_name}' attempt {} timed out, retrying in {}ms: {e}",
+                        attempt + 1,
+                        delay.as_millis()
                     );
 
                     // Yield even on zero-delay to avoid busy-wait loop
@@ -311,18 +286,15 @@ where
 
                     if let Some(token) = cancel {
                         tokio::select! {
-                            () = tokio::time::sleep(delay) => {},
+                            biased;
+                            () = dst::time::sleep(delay) => {},
                             () = token.cancelled() => {
-                                tracing::debug!(
-                                    operation = %operation_name,
-                                    attempt = attempt + 1,
-                                    "Operation canceled during retry delay"
-                                );
+                                log::debug!("Operation '{operation_name}' canceled during retry delay (attempt {})", attempt + 1);
                                 return Err(create_error("canceled".to_string()));
                             }
                         }
                     } else {
-                        tokio::time::sleep(delay).await;
+                        dst::time::sleep(delay).await;
                     }
                     attempt += 1;
                 }
@@ -381,6 +353,7 @@ where
 }
 
 /// Convenience function to create a retry manager with default configuration.
+#[must_use]
 pub fn create_default_retry_manager<E>() -> RetryManager<E>
 where
     E: std::error::Error,
@@ -389,6 +362,7 @@ where
 }
 
 /// Convenience function to create a retry manager for HTTP operations.
+#[must_use]
 pub const fn create_http_retry_manager<E>() -> RetryManager<E>
 where
     E: std::error::Error,
@@ -407,6 +381,7 @@ where
 }
 
 /// Convenience function to create a retry manager for WebSocket operations.
+#[must_use]
 pub const fn create_websocket_retry_manager<E>() -> RetryManager<E>
 where
     E: std::error::Error,
@@ -495,7 +470,10 @@ mod tests {
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.initial_delay_ms, 1_000);
         assert_eq!(config.max_delay_ms, 10_000);
-        assert_eq!(config.backoff_factor, 2.0);
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(config.backoff_factor, 2.0);
+        }
         assert_eq!(config.jitter_ms, 100);
         assert_eq!(config.operation_timeout_ms, Some(30_000));
         assert!(!config.immediate_first);
@@ -1560,21 +1538,21 @@ mod proptest_tests {
             // Check subsequent retries have appropriate delays
             for i in 1..times.len() {
                 let delay_from_previous = if i == 1 {
-                    times[i] - times[0]
+                    times[i].checked_sub(times[0]).unwrap()
                 } else {
-                    times[i] - times[i - 1]
+                    times[i].checked_sub(times[i - 1]).unwrap()
                 };
 
                 // The delay should be at least base_delay_ms
                 prop_assert!(
-                    delay_from_previous.as_millis() >= base_delay_ms as u128,
+                    delay_from_previous.as_millis() >= u128::from(base_delay_ms),
                     "Retry {} delay {}ms is less than base {}ms",
                     i, delay_from_previous.as_millis(), base_delay_ms
                 );
 
                 // Delay should be at most base_delay + jitter
                 prop_assert!(
-                    delay_from_previous.as_millis() <= (base_delay_ms + jitter_ms + 1) as u128,
+                    delay_from_previous.as_millis() <= u128::from(base_delay_ms + jitter_ms + 1),
                     "Retry {} delay {}ms exceeds base {} + jitter {}",
                     i, delay_from_previous.as_millis(), base_delay_ms, jitter_ms
                 );
@@ -1649,7 +1627,7 @@ mod proptest_tests {
                     times[1].as_millis());
             } else {
                 // First retry should have delay
-                prop_assert!(times[1].as_millis() >= (initial_delay_ms - 1) as u128,
+                prop_assert!(times[1].as_millis() >= u128::from(initial_delay_ms - 1),
                     "With immediate_first=false, first retry was too fast: {}ms",
                     times[1].as_millis());
             }

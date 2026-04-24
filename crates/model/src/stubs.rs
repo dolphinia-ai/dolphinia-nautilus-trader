@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -29,6 +29,16 @@ use crate::{
     types::{Money, Price, Quantity},
 };
 
+/// A trait for providing test-only default values.
+///
+/// This trait is intentionally separate from [`Default`] to make it clear
+/// that these default values are only meaningful in testing contexts and should
+/// not be used in production code.
+pub trait TestDefault {
+    /// Creates a new instance with test-appropriate default values.
+    fn test_default() -> Self;
+}
+
 /// Calculate commission for testing.
 ///
 /// # Panics
@@ -36,6 +46,7 @@ use crate::{
 /// This function panics if:
 /// - The liquidity side is `NoLiquiditySide`.
 /// - `instrument.maker_fee()` or `instrument.taker_fee()` cannot be converted to `f64`.
+#[must_use]
 pub fn calculate_commission(
     instrument: &InstrumentAny,
     last_qty: Quantity,
@@ -58,6 +69,7 @@ pub fn calculate_commission(
     } else {
         panic!("Invalid liquidity side {liquidity_side}")
     };
+
     if instrument.is_inverse() && !use_quote_for_inverse.unwrap_or(false) {
         Money::new(commission, instrument.base_currency().unwrap())
     } else {
@@ -127,7 +139,7 @@ pub fn stub_order_book_mbp_appl_xnas() -> OrderBook {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 #[must_use]
 pub fn stub_order_book_mbp(
     instrument_id: InstrumentId,

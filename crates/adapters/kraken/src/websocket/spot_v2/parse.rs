@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -188,7 +188,7 @@ pub fn parse_book_deltas(
     Ok(deltas)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn parse_book_level(
     level: &KrakenWsBookLevel,
     side: OrderSide,
@@ -290,22 +290,22 @@ fn parse_order_status(
     exec_type: KrakenExecType,
     order_status: Option<KrakenWsOrderStatus>,
 ) -> OrderStatus {
-    // First check exec_type for terminal states
     match exec_type {
         KrakenExecType::Canceled => return OrderStatus::Canceled,
         KrakenExecType::Expired => return OrderStatus::Expired,
+        KrakenExecType::Filled => return OrderStatus::Filled,
+        KrakenExecType::Trade => {
+            return match order_status {
+                Some(KrakenWsOrderStatus::Filled) => OrderStatus::Filled,
+                Some(KrakenWsOrderStatus::PartiallyFilled) | None => OrderStatus::PartiallyFilled,
+                Some(status) => status.into(),
+            };
+        }
         _ => {}
     }
 
-    // Then check order_status field
     match order_status {
-        Some(KrakenWsOrderStatus::PendingNew) => OrderStatus::Submitted,
-        Some(KrakenWsOrderStatus::New) => OrderStatus::Accepted,
-        Some(KrakenWsOrderStatus::PartiallyFilled) => OrderStatus::PartiallyFilled,
-        Some(KrakenWsOrderStatus::Filled) => OrderStatus::Filled,
-        Some(KrakenWsOrderStatus::Canceled) => OrderStatus::Canceled,
-        Some(KrakenWsOrderStatus::Expired) => OrderStatus::Expired,
-        Some(KrakenWsOrderStatus::Triggered) => OrderStatus::Triggered,
+        Some(status) => status.into(),
         None => OrderStatus::Accepted,
     }
 }
@@ -319,6 +319,9 @@ fn parse_order_type(order_type: Option<KrakenOrderType>) -> OrderType {
         Some(KrakenOrderType::TakeProfit) => OrderType::MarketIfTouched,
         Some(KrakenOrderType::StopLossLimit) => OrderType::StopLimit,
         Some(KrakenOrderType::TakeProfitLimit) => OrderType::LimitIfTouched,
+        // Trailing stops lack offset fields in WS reports, map to non-trailing equivalents
+        Some(KrakenOrderType::TrailingStop) => OrderType::StopMarket,
+        Some(KrakenOrderType::TrailingStopLimit) => OrderType::StopLimit,
         Some(KrakenOrderType::SettlePosition) => OrderType::Market,
         None => OrderType::Limit,
     }
@@ -351,13 +354,8 @@ fn parse_time_in_force(
     }
 }
 
-/// Parses Kraken liquidity indicator to Nautilus liquidity side.
 fn parse_liquidity_side(liquidity_ind: Option<KrakenLiquidityInd>) -> LiquiditySide {
-    match liquidity_ind {
-        Some(KrakenLiquidityInd::Maker) => LiquiditySide::Maker,
-        Some(KrakenLiquidityInd::Taker) => LiquiditySide::Taker,
-        None => LiquiditySide::NoLiquiditySide,
-    }
+    liquidity_ind.map_or(LiquiditySide::NoLiquiditySide, Into::into)
 }
 
 /// Parses a Kraken WebSocket execution message into an [`OrderStatusReport`].
@@ -481,6 +479,7 @@ pub fn parse_ws_order_status_report(
             | OrderType::MarketIfTouched
             | OrderType::LimitIfTouched
     );
+
     if is_conditional {
         report = report.with_trigger_type(TriggerType::Default);
     }
@@ -611,6 +610,7 @@ mod tests {
             None,
             None,
             None,
+            None, // info
             TS,
             TS,
         ))

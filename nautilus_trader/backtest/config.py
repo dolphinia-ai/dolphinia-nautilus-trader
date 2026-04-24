@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -39,70 +39,12 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import OmsType
+from nautilus_trader.model.enums import OtoTriggerMode
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.persistence.funcs import parse_filters_expr
 from nautilus_trader.risk.config import RiskEngineConfig
 from nautilus_trader.system.config import NautilusKernelConfig
-
-
-def parse_filters_expr(s: str | None):
-    """
-    Parse a pyarrow.dataset filter expression from a string.
-
-    >>> parse_filters_expr('field("Currency") == "CHF"')
-    <pyarrow.dataset.Expression (Currency == "CHF")>
-
-    >>> parse_filters_expr("print('hello')")
-
-    >>> parse_filters_expr("None")
-
-    """
-    import re
-
-    from pyarrow.dataset import field
-
-    if not s:
-        return None
-
-    # Normalise single-quoted filters so our regex only has to reason about
-    # the double-quoted form produced by Nautilus itself. If the expression
-    # already contains double quotes we leave it unchanged to avoid corrupting
-    # mixed quoting scenarios.
-    if "'" in s and '"' not in s:
-        s = s.replace("'", '"')
-
-    # Security: Only allow very specific PyArrow field expressions
-    # Pattern matches: field("name") == "value", field("name") != "value", etc.
-    # Optional opening/closing parentheses are allowed around each comparison so
-    # we can safely compose expressions such as
-    #     (field("Currency") == "CHF") | (field("Symbol") == "USD")
-    # Supported grammar (regex-validated):
-    #     [ '(' ] field("name") <op> "literal" [ ')' ] ( ( '|' | '&' ) ... )*
-    safe_pattern = (
-        r"^(\()?"
-        r'field\("[^"]+"\)\s*[!=<>]+\s*"[^"]*"'
-        r"(\))?"
-        r'(\s*[|&]\s*(\()?field\("[^"]+"\)\s*[!=<>]+\s*"[^"]*"(\))?)*$'
-    )
-
-    if not re.match(safe_pattern, s.strip()):
-        raise ValueError(
-            f"Filter expression '{s}' is not allowed. Only field() comparisons are permitted.",
-        )
-
-    try:
-        # For now, rely on the regex validation above to guarantee safety and
-        # evaluate the expression in a minimal global namespace that only exposes
-        # the `field` helper. Built-ins are intentionally left untouched because
-        # PyArrow requires access to them (for example it imports `decimal` under
-        # the hood). Stripping them leads to a hard crash inside the C++ layer
-        # of Arrow. The expression is still safe because the regex prevents any
-        # reference other than the allowed `field(...)` comparisons.
-        allowed_globals = {"field": field}
-        return eval(s, allowed_globals, {})  # noqa: S307
-
-    except Exception as e:
-        raise ValueError(f"Failed to parse filter expression '{s}': {e}")
 
 
 class BacktestVenueConfig(NautilusConfig, frozen=True):
@@ -147,12 +89,19 @@ class BacktestVenueConfig(NautilusConfig, frozen=True):
     support_contingent_orders : bool, default True
         If contingent orders will be supported/respected by the venue.
         If False, then it's expected the strategy will be managing any contingent orders.
+    oto_trigger_mode : OtoTriggerMode | str, default "PARTIAL"
+        The OTO trigger mode for contingent orders:
+        - ``PARTIAL``: release child orders pro-rata to each partial fill (default).
+        - ``FULL``: release child orders only once the parent is fully filled.
     use_position_ids : bool, default True
         If venue position IDs will be generated on order fills.
     use_random_ids : bool, default False
-        If all venue generated identifiers will be random UUID4's.
+        If venue order IDs and position IDs will be random UUID4's.
+        Trade IDs are always deterministic and not affected by this flag.
     use_reduce_only : bool, default True
         If the `reduce_only` execution instruction on orders will be honored.
+    use_market_order_acks : bool, default False
+        If OrderAccepted events will be generated for market orders before filling.
     bar_execution : bool, default True
         If bars should be processed by the matching engine(s) (and move the market).
     bar_adaptive_high_low_ordering : bool, default False
@@ -162,15 +111,31 @@ class BacktestVenueConfig(NautilusConfig, frozen=True):
         If True, the processing order adapts with the heuristic:
         - If High is closer to Open than Low then the processing order is Open, High, Low, Close.
         - If Low is closer to Open than High then the processing order is Open, Low, High, Close.
-    trade_execution : bool, default False
+    trade_execution : bool, default True
         If trades should be processed by the matching engine(s) (and move the market).
+    liquidity_consumption : bool, default False
+        If liquidity consumption should be tracked per price level. When enabled, fills
+        consume available liquidity which resets when fresh data arrives at that level.
+        When disabled, each iteration can fill against the full book liquidity independently.
+    queue_position : bool, default False
+        If queue position tracking should be enabled for limit orders during trade
+        execution mode. When enabled, limit orders only fill after the quantity ahead
+        of them (at order placement time) has been traded through or the price level
+        is deleted. Requires trade_execution=True.
     allow_cash_borrowing : bool, default False
         If borrowing is allowed for cash accounts (negative balances).
     frozen_account : bool, default False
         If the account for this exchange is frozen (balances will not change).
-    price_protection_points : int, default 0
+    price_protection_points : NonNegativeInt, default 0
         Defines an exchange-calculated price boundary (in points) to prevent
         marketable orders from executing at excessively aggressive prices.
+        For BUY orders: protection_price = ask + (points * price_increment).
+        For SELL orders: protection_price = bid - (points * price_increment).
+        Set to 0 to disable price protection.
+    settlement_prices : dict[InstrumentId, float], optional
+        Map of instrument ID to settlement price for expiring instruments.
+        For futures, positions close at this price instead of market.
+        For options, the option leg settles at this price.
 
     """
 
@@ -191,15 +156,20 @@ class BacktestVenueConfig(NautilusConfig, frozen=True):
     reject_stop_orders: bool = True
     support_gtd_orders: bool = True
     support_contingent_orders: bool = True
+    oto_trigger_mode: OtoTriggerMode | str = "PARTIAL"
     use_position_ids: bool = True
     use_random_ids: bool = False
     use_reduce_only: bool = True
+    use_market_order_acks: bool = False
     bar_execution: bool = True
     bar_adaptive_high_low_ordering: bool = False
-    trade_execution: bool = False
+    trade_execution: bool = True
+    liquidity_consumption: bool = False
+    queue_position: bool = False
     allow_cash_borrowing: bool = False
     frozen_account: bool = False
-    price_protection_points: int = 0
+    price_protection_points: NonNegativeInt = 0
+    settlement_prices: dict[InstrumentId, float] | None = None
 
 
 class BacktestDataConfig(NautilusConfig, frozen=True):
@@ -241,6 +211,9 @@ class BacktestDataConfig(NautilusConfig, frozen=True):
     bar_types : list[BarType | str], optional
         The bar types for the data catalog query.
         Can be used if instrument_id is not specified.
+    optimize_file_loading : bool, default False
+        If True, registers entire directories with the query backend for efficient
+        loading. If False, registers each file individually (e.g. for precise file control).
 
     """
 
@@ -258,6 +231,7 @@ class BacktestDataConfig(NautilusConfig, frozen=True):
     bar_spec: str | None = None
     instrument_ids: list[str] | None = None
     bar_types: list[str] | None = None
+    optimize_file_loading: bool = False
 
     @property
     def data_type(self) -> type:
@@ -292,7 +266,10 @@ class BacktestDataConfig(NautilusConfig, frozen=True):
             elif self.instrument_id and self.bar_spec:
                 identifiers = [f"{self.instrument_id}-{self.bar_spec}-EXTERNAL"]
             elif self.instrument_ids and self.bar_spec:
-                identifiers = [f"{instrument_id}-{self.bar_spec}-EXTERNAL" for instrument_id in self.instrument_ids]
+                identifiers = [
+                    f"{instrument_id}-{self.bar_spec}-EXTERNAL"
+                    for instrument_id in self.instrument_ids
+                ]
 
         if not identifiers:
             if self.instrument_id:
@@ -307,6 +284,7 @@ class BacktestDataConfig(NautilusConfig, frozen=True):
             "end": self.end_time,
             "filter_expr": parse_filters_expr(self.filter_expr),
             "metadata": self.metadata,
+            "optimize_file_loading": self.optimize_file_loading,
         }
 
     @property
@@ -464,8 +442,6 @@ class FillModelConfig(NautilusConfig, frozen=True):
     ----------
     prob_fill_on_limit : float, default 1.0
         The probability of limit order filling if the market rests on its price.
-    prob_fill_on_stop : float, default 1.0
-        The probability of stop orders filling if the market rests on its price.
     prob_slippage : float, default 0.0
         The probability of order fill prices slipping by one tick.
     random_seed : int, optional
@@ -474,7 +450,6 @@ class FillModelConfig(NautilusConfig, frozen=True):
     """
 
     prob_fill_on_limit: float = 1.0
-    prob_fill_on_stop: float = 1.0
     prob_slippage: float = 0.0
     random_seed: int | None = None
 

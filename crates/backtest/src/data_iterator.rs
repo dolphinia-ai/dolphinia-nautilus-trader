@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,11 +13,11 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-#![allow(dead_code)]
-#![allow(clippy::module_name_repetitions)]
+//! Multi-stream, time-ordered data iterator for replaying historical market data.
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
+use ahash::AHashMap;
 use nautilus_core::UnixNanos;
 use nautilus_model::data::{Data, HasTsInit};
 
@@ -49,32 +49,34 @@ impl PartialOrd for HeapEntry {
 /// Multi-stream, time-ordered data iterator used by the backtest engine.
 #[derive(Debug, Default)]
 pub struct BacktestDataIterator {
-    streams: HashMap<i32, Vec<Data>>, // key: priority, value: Vec<Data>
-    names: HashMap<i32, String>,      // priority -> name
-    priorities: HashMap<String, i32>, // name -> priority
-    indices: HashMap<i32, usize>,     // cursor per stream
+    streams: AHashMap<i32, Vec<Data>>, // key: priority, value: Vec<Data>
+    names: AHashMap<i32, String>,      // priority -> name
+    priorities: AHashMap<String, i32>, // name -> priority
+    indices: AHashMap<i32, usize>,     // cursor per stream
     heap: BinaryHeap<HeapEntry>,
     single_priority: Option<i32>,
     next_priority_counter: i32, // monotonically increasing counter used to assign priorities
 }
 
 impl BacktestDataIterator {
-    /// Create an empty [`BacktestDataIterator`].
+    /// Creates a new empty [`BacktestDataIterator`].
     #[must_use]
     pub fn new() -> Self {
         Self {
-            streams: HashMap::new(),
-            names: HashMap::new(),
-            priorities: HashMap::new(),
-            indices: HashMap::new(),
+            streams: AHashMap::new(),
+            names: AHashMap::new(),
+            priorities: AHashMap::new(),
+            indices: AHashMap::new(),
             heap: BinaryHeap::new(),
             single_priority: None,
             next_priority_counter: 0,
         }
     }
 
-    /// Add (or replace) a named data stream.  `append_data=true` gives the stream
-    /// lower priority when timestamps tie, mirroring the original behaviour.
+    /// Adds (or replaces) a named data stream.
+    ///
+    /// When `append_data` is true the stream gets lower priority on timestamp
+    /// ties; when false (prepend) it wins ties.
     pub fn add_data(&mut self, name: &str, mut data: Vec<Data>, append_data: bool) {
         if data.is_empty() {
             return;
@@ -103,8 +105,7 @@ impl BacktestDataIterator {
         self.rebuild_heap();
     }
 
-    /// Remove a stream.  `complete_remove` also discards placeholder generator
-    /// (not implemented yet).
+    /// Removes a named data stream.
     pub fn remove_data(&mut self, name: &str, complete_remove: bool) {
         if let Some(priority) = self.priorities.remove(name) {
             self.streams.remove(&priority);
@@ -118,12 +119,13 @@ impl BacktestDataIterator {
                 self.single_priority = None;
             }
         }
+
         if complete_remove {
             // Placeholder for future generator cleanup
         }
     }
 
-    /// Move cursor of stream to `index` (0-based).
+    /// Sets the cursor of a named stream to `index` (0-based).
     pub fn set_index(&mut self, name: &str, index: usize) {
         if let Some(priority) = self.priorities.get(name) {
             self.indices.insert(*priority, index);
@@ -131,8 +133,16 @@ impl BacktestDataIterator {
         }
     }
 
-    /// Return next Data element across all streams in chronological order.
-    #[allow(clippy::should_implement_trait)]
+    /// Resets all stream cursors to the beginning.
+    pub fn reset_all_cursors(&mut self) {
+        for idx in self.indices.values_mut() {
+            *idx = 0;
+        }
+        self.rebuild_heap();
+    }
+
+    /// Returns the next [`Data`] element across all streams in chronological order.
+    #[expect(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Data> {
         // Fast path for single stream
         if let Some(p) = self.single_priority {
@@ -165,6 +175,7 @@ impl BacktestDataIterator {
         Some(element)
     }
 
+    /// Returns whether all streams have been fully consumed.
     #[must_use]
     pub fn is_done(&self) -> bool {
         if let Some(p) = self.single_priority {
@@ -226,34 +237,343 @@ mod tests {
         ))
     }
 
+    fn collect_ts(it: &mut BacktestDataIterator) -> Vec<u64> {
+        let mut ts = Vec::new();
+        while let Some(d) = it.next() {
+            ts.push(d.ts_init().as_u64());
+        }
+        ts
+    }
+
     #[rstest]
-    fn test_single_stream() {
+    fn test_single_stream_yields_in_order() {
         let mut it = BacktestDataIterator::new();
-        let stream = vec![quote("BTC-PERP.BINANCE", 1), quote("BTC-PERP.BINANCE", 3)];
-        it.add_data("main", stream, true);
+        it.add_data(
+            "s",
+            vec![quote("A.B", 100), quote("A.B", 200), quote("A.B", 300)],
+            true,
+        );
+
+        assert_eq!(collect_ts(&mut it), vec![100, 200, 300]);
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_single_stream_exhaustion_returns_none() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1), quote("A.B", 3)], true);
         assert_eq!(it.next().unwrap().ts_init(), UnixNanos::from(1));
         assert_eq!(it.next().unwrap().ts_init(), UnixNanos::from(3));
         assert!(it.next().is_none());
     }
 
     #[rstest]
-    fn test_two_stream_merge() {
+    fn test_single_stream_sorts_unsorted_input() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data(
+            "s",
+            vec![quote("A.B", 300), quote("A.B", 100), quote("A.B", 200)],
+            true,
+        );
+
+        assert_eq!(collect_ts(&mut it), vec![100, 200, 300]);
+    }
+
+    #[rstest]
+    fn test_two_stream_merge_chronological() {
         let mut it = BacktestDataIterator::new();
         it.add_data("s1", vec![quote("A.B", 1), quote("A.B", 4)], true);
         it.add_data("s2", vec![quote("C.D", 2), quote("C.D", 3)], false);
 
-        let mut ts = Vec::new();
-        while let Some(d) = it.next() {
-            ts.push(d.ts_init());
+        assert_eq!(collect_ts(&mut it), vec![1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    fn test_three_stream_merge_sorted() {
+        let mut it = BacktestDataIterator::new();
+        let data_len = 5;
+        let d0: Vec<Data> = (0..data_len).map(|k| quote("A.B", 3 * k)).collect();
+        let d1: Vec<Data> = (0..data_len).map(|k| quote("C.D", 3 * k + 1)).collect();
+        let d2: Vec<Data> = (0..data_len).map(|k| quote("E.F", 3 * k + 2)).collect();
+        it.add_data("d0", d0, true);
+        it.add_data("d1", d1, true);
+        it.add_data("d2", d2, true);
+
+        let ts = collect_ts(&mut it);
+        assert_eq!(ts.len(), 15);
+        for i in 0..ts.len() - 1 {
+            assert!(ts[i] <= ts[i + 1], "Not sorted at index {i}");
         }
-        assert_eq!(
-            ts,
+    }
+
+    #[rstest]
+    fn test_multiple_streams_merge_order() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s1", vec![quote("A.B", 100), quote("A.B", 300)], true);
+        it.add_data("s2", vec![quote("C.D", 200), quote("C.D", 400)], true);
+
+        assert_eq!(collect_ts(&mut it), vec![100, 200, 300, 400]);
+    }
+
+    #[rstest]
+    fn test_append_data_priority_default_fifo() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("a", vec![quote("A.B", 100)], true);
+        it.add_data("b", vec![quote("C.D", 100)], true);
+
+        // Both at same timestamp, FIFO order (a before b)
+        let ts = collect_ts(&mut it);
+        assert_eq!(ts, vec![100, 100]);
+    }
+
+    #[rstest]
+    fn test_prepend_priority_wins_ties() {
+        let mut it = BacktestDataIterator::new();
+        // "a" is appended (lower priority), "b" is prepended (higher priority)
+        it.add_data("a", vec![quote("A.B", 100)], true);
+        it.add_data("b", vec![quote("C.D", 100)], false);
+
+        // "b" (prepend) should come first despite being added second
+        let first = it.next().unwrap();
+        let second = it.next().unwrap();
+        // Prepend stream (negative priority) wins ties over append (positive)
+        assert_eq!(first.instrument_id(), InstrumentId::from("C.D"));
+        assert_eq!(second.instrument_id(), InstrumentId::from("A.B"));
+    }
+
+    #[rstest]
+    fn test_is_done_empty_iterator() {
+        let it = BacktestDataIterator::new();
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_is_done_after_consumption() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1)], true);
+
+        assert!(!it.is_done());
+        it.next();
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_is_done_multi_stream() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s1", vec![quote("A.B", 1)], true);
+        it.add_data("s2", vec![quote("C.D", 2)], true);
+
+        assert!(!it.is_done());
+        it.next();
+        assert!(!it.is_done());
+        it.next();
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_partial_consumption_then_complete() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data(
+            "s",
             vec![
-                UnixNanos::from(1),
-                UnixNanos::from(2),
-                UnixNanos::from(3),
-                UnixNanos::from(4)
-            ]
+                quote("A.B", 0),
+                quote("A.B", 1),
+                quote("A.B", 2),
+                quote("A.B", 3),
+            ],
+            true,
         );
+
+        assert_eq!(it.next().unwrap().ts_init().as_u64(), 0);
+        assert_eq!(it.next().unwrap().ts_init().as_u64(), 1);
+
+        let remaining = collect_ts(&mut it);
+        assert_eq!(remaining, vec![2, 3]);
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_remove_stream_reduces_output() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("a", vec![quote("A.B", 1)], true);
+        it.add_data("b", vec![quote("C.D", 2)], true);
+
+        it.remove_data("a", false);
+
+        assert_eq!(collect_ts(&mut it), vec![2]);
+    }
+
+    #[rstest]
+    fn test_remove_all_streams_yields_empty() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("x", vec![quote("A.B", 1)], true);
+        it.add_data("y", vec![quote("C.D", 2)], true);
+
+        it.remove_data("x", false);
+        it.remove_data("y", false);
+
+        assert!(it.next().is_none());
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_remove_nonexistent_stream_is_noop() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1)], true);
+
+        it.remove_data("nonexistent", false);
+
+        assert_eq!(collect_ts(&mut it), vec![1]);
+    }
+
+    #[rstest]
+    fn test_remove_after_full_consumption() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1), quote("A.B", 2)], true);
+
+        collect_ts(&mut it);
+
+        it.remove_data("s", true);
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_set_index_rewinds_stream() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data(
+            "s",
+            vec![quote("A.B", 10), quote("A.B", 20), quote("A.B", 30)],
+            true,
+        );
+
+        assert_eq!(it.next().unwrap().ts_init().as_u64(), 10);
+
+        it.set_index("s", 0);
+
+        assert_eq!(collect_ts(&mut it), vec![10, 20, 30]);
+    }
+
+    #[rstest]
+    fn test_set_index_skips_forward() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data(
+            "s",
+            vec![quote("A.B", 10), quote("A.B", 20), quote("A.B", 30)],
+            true,
+        );
+
+        it.set_index("s", 2);
+
+        assert_eq!(collect_ts(&mut it), vec![30]);
+    }
+
+    #[rstest]
+    fn test_set_index_nonexistent_stream_is_noop() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1)], true);
+
+        it.set_index("nonexistent", 0);
+
+        assert_eq!(collect_ts(&mut it), vec![1]);
+    }
+
+    #[rstest]
+    fn test_reset_all_cursors_single_stream() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s", vec![quote("A.B", 1), quote("A.B", 2)], true);
+
+        collect_ts(&mut it);
+        assert!(it.is_done());
+
+        it.reset_all_cursors();
+        assert!(!it.is_done());
+        assert_eq!(collect_ts(&mut it), vec![1, 2]);
+    }
+
+    #[rstest]
+    fn test_reset_all_cursors_multi_stream() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s1", vec![quote("A.B", 1), quote("A.B", 3)], true);
+        it.add_data("s2", vec![quote("C.D", 2), quote("C.D", 4)], true);
+
+        collect_ts(&mut it);
+        assert!(it.is_done());
+
+        it.reset_all_cursors();
+        assert_eq!(collect_ts(&mut it), vec![1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    fn test_readding_data_replaces_stream() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("X", vec![quote("A.B", 1), quote("A.B", 2)], true);
+        it.add_data("X", vec![quote("A.B", 10)], true);
+
+        assert_eq!(collect_ts(&mut it), vec![10]);
+    }
+
+    #[rstest]
+    fn test_add_empty_data_is_noop() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("empty", vec![], true);
+
+        assert!(it.is_done());
+        assert!(it.next().is_none());
+    }
+
+    #[rstest]
+    fn test_empty_iterator_returns_none() {
+        let mut it = BacktestDataIterator::new();
+        assert!(it.next().is_none());
+        assert!(it.is_done());
+    }
+
+    #[rstest]
+    fn test_multiple_add_data_calls_with_different_names() {
+        let mut it = BacktestDataIterator::new();
+        it.add_data("batch_0", vec![quote("A.B", 1), quote("A.B", 3)], true);
+        it.add_data("batch_1", vec![quote("A.B", 2), quote("A.B", 4)], true);
+
+        assert_eq!(collect_ts(&mut it), vec![1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    fn test_prepend_stream_always_wins_ties_across_batches() {
+        // Verifies that a prepend stream (negative priority) wins ties
+        // even when added after multiple append streams
+        let mut it = BacktestDataIterator::new();
+        it.add_data("append_a", vec![quote("A.B", 100)], true);
+        it.add_data("append_b", vec![quote("C.D", 100)], true);
+        it.add_data("prepend", vec![quote("E.F", 100)], false);
+
+        let first = it.next().unwrap();
+        assert_eq!(
+            first.instrument_id(),
+            InstrumentId::from("E.F"),
+            "Prepend stream should always come first in ties"
+        );
+    }
+
+    #[rstest]
+    fn test_equal_timestamps_across_many_streams_preserves_priority_order() {
+        // All items at the same timestamp — ordering is strictly by priority
+        let mut it = BacktestDataIterator::new();
+        it.add_data("s1", vec![quote("A.B", 50)], true);
+        it.add_data("s2", vec![quote("C.D", 50)], true);
+        it.add_data("s3", vec![quote("E.F", 50)], true);
+        it.add_data("s4", vec![quote("G.H", 50)], true);
+
+        let mut ids = Vec::new();
+        while let Some(d) = it.next() {
+            ids.push(d.instrument_id());
+        }
+
+        assert_eq!(ids.len(), 4);
+
+        // All should be yielded (no duplicates dropped, no items lost)
+        assert!(ids.contains(&InstrumentId::from("A.B")));
+        assert!(ids.contains(&InstrumentId::from("C.D")));
+        assert!(ids.contains(&InstrumentId::from("E.F")));
+        assert!(ids.contains(&InstrumentId::from("G.H")));
     }
 }

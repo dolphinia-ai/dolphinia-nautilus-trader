@@ -16,6 +16,24 @@ cdef extern from "../includes/core.h":
     # Number of nanoseconds in one microsecond.
     const uint64_t NANOSECONDS_IN_MICROSECOND # = 1000
 
+    # Number of nanoseconds in one minute.
+    const uint64_t NANOSECONDS_IN_MINUTE # = (60 * NANOSECONDS_IN_SECOND)
+
+    # Number of nanoseconds in one day.
+    const uint64_t NANOSECONDS_IN_DAY # = ((24 * 60) * NANOSECONDS_IN_MINUTE)
+
+    # Number of seconds in one minute.
+    const uint64_t SECONDS_IN_MINUTE # = 60
+
+    # Number of seconds in one hour.
+    const uint64_t SECONDS_IN_HOUR # = (60 * SECONDS_IN_MINUTE)
+
+    # Number of seconds in one day.
+    const uint64_t SECONDS_IN_DAY # = (24 * SECONDS_IN_HOUR)
+
+    # Maximum capacity in characters for a [`StackStr`].
+    const uintptr_t STACKSTR_CAPACITY # = 36
+
     # `CVec` is a C compatible struct that stores an opaque pointer to a block of
     # memory, its length and the capacity of the vector it was allocated from.
     #
@@ -38,6 +56,30 @@ cdef extern from "../includes/core.h":
         # The UUID v4 value as a fixed-length C string byte array (includes null terminator).
         uint8_t value[37];
 
+    # A stack-allocated ASCII string with a maximum capacity of 36 characters.
+    #
+    # Optimized for short identifier strings with:
+    # - Stack allocation (no heap).
+    # - `Copy` semantics.
+    # - O(1) length access.
+    # - C FFI compatibility (null-terminated).
+    #
+    # ASCII is required to guarantee 1 character == 1 byte, ensuring the buffer
+    # always holds exactly the capacity in characters. This aligns with identifier
+    # conventions which are inherently ASCII.
+    #
+    # # Memory Layout
+    #
+    # The `value` field is placed first so the struct pointer equals the string
+    # pointer, making C FFI more natural: `(char*)&stack_str` works directly.
+    cdef struct StackStr:
+        # ASCII data with null terminator for C FFI.
+        uint8_t value[37];
+        # Length of the string in bytes (0-36).
+        uint8_t len;
+    # Maximum length in characters.
+    const uintptr_t StackStr_MAX_LEN # = STACKSTR_CAPACITY
+
     # Construct a new *empty* [`CVec`] value for use as initialiser/sentinel in foreign code.
     CVec cvec_new();
 
@@ -52,6 +94,12 @@ cdef extern from "../includes/core.h":
     uint64_t secs_to_nanos(double secs);
 
     # Converts seconds to milliseconds (ms).
+    #
+    # # Panics
+    #
+    # Panics if [`crate::datetime::secs_to_millis`] returns an error for `secs`.
+    # The panic is caught by [`abort_on_panic`] and converted into a process abort
+    # across the FFI boundary.
     uint64_t secs_to_millis(double secs);
 
     # Converts milliseconds (ms) to nanoseconds (ns).

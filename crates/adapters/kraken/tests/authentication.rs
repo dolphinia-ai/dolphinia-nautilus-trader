@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -72,12 +72,12 @@ async fn test_http_client_get_websockets_token() {
         "dGVzdF9hcGlfc2VjcmV0X2Jhc2U2NA==".to_string(), // Base64 encoded "test_api_secret_base64"
         KrakenEnvironment::Mainnet,
         Some(base_url),
-        Some(10),
+        10,
         None,
         None,
         None,
         None,
-        None,
+        5,
     )
     .unwrap();
 

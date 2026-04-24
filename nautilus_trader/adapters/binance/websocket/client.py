@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -183,6 +183,7 @@ class BinanceWebSocketClient:
 
         # Group streams by client (using existing assignments or creating new ones)
         client_streams: dict[int, list[str]] = {}
+
         for stream in self._streams:
             client_id = self._get_client_for_stream(stream)
             if client_id == -1:
@@ -329,18 +330,6 @@ class BinanceWebSocketClient:
 
         self._clients[client_id] = None  # Dispose (will go out of scope)
         self._log.debug(f"ws-client {client_id}: Disconnected from {self._base_url}")
-
-    async def subscribe_listen_key(self, listen_key: str) -> None:
-        """
-        Subscribe to user data stream.
-        """
-        await self._subscribe(listen_key)
-
-    async def unsubscribe_listen_key(self, listen_key: str) -> None:
-        """
-        Unsubscribe from user data stream.
-        """
-        await self._unsubscribe(listen_key)
 
     async def subscribe_agg_trades(self, symbol: str) -> None:
         """
