@@ -16,8 +16,51 @@
 import asyncio
 import inspect
 import os
+import site
 import sys
 from pathlib import Path
+
+# When the repository is on ``sys.path`` but native extensions are not built,
+# ``import nautilus_trader`` resolves to the source tree and fails. Set
+# ``NAUTILUS_TEST_SITE_PACKAGES=1`` to prefer site-packages (installed wheel)
+# over the incomplete checkout. The repo root and ``""`` (cwd) must be moved
+# to the end of ``sys.path`` or they shadow ``site-packages`` even when
+# prepended.
+if os.environ.get("NAUTILUS_TEST_SITE_PACKAGES", "").lower() in ("1", "true", "yes"):
+    _repo_root = Path(__file__).resolve().parent.parent
+    _site_paths: list[str] = []
+    _site_paths.extend(site.getsitepackages())
+    _user_site = site.getusersitepackages()
+    if _user_site:
+        _site_paths.append(_user_site)
+    for _path in _site_paths:
+        if _path and _path not in sys.path:
+            sys.path.insert(0, _path)
+    _defer: list[str] = []
+    for _candidate in list(sys.path):
+        if not _candidate or _candidate in (".",):
+            sys.path.remove(_candidate)
+            _defer.append(_candidate)
+            continue
+        try:
+            if Path(_candidate).resolve() == _repo_root:
+                sys.path.remove(_candidate)
+                _defer.append(_candidate)
+        except OSError:
+            continue
+    sys.path.extend(_defer)
+
+    import nautilus_trader as _nautilus_trader_package
+    from nautilus_trader.test_kit.providers import TestDataProvider as _TestDataProvider
+
+    _repo_test_data = _repo_root / "tests" / "test_data"
+    if _repo_test_data.is_dir():
+        _nautilus_trader_package.TEST_DATA_DIR = _repo_test_data
+
+    def _patched_test_data_directory() -> str | None:
+        return str(_repo_test_data) if _repo_test_data.is_dir() else None
+
+    _TestDataProvider._test_data_directory = staticmethod(_patched_test_data_directory)
 
 import pytest
 
