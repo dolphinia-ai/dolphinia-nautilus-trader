@@ -72,6 +72,41 @@ from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.persistence.wranglers import QuoteTickDataWrangler
 from nautilus_trader.test_kit.providers import TestDataProvider
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
+from nautilus_trader.test_kit.stubs.component import TestComponentStubs
+
+
+def _cache_has_instrument_status_time_series_api() -> bool:
+    try:
+        cache = TestComponentStubs.cache()
+        return hasattr(cache, "instrument_status")
+    except Exception:
+        return False
+
+
+_CACHE_INSTRUMENT_STATUS_TS = _cache_has_instrument_status_time_series_api()
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    if _CACHE_INSTRUMENT_STATUS_TS:
+        return
+    skip_mark = pytest.mark.skip(
+        reason=(
+            "Cache.instrument_status time-series API not in installed binaries "
+            "(wheel build older than this checkout). "
+            "Build from source, use a newer develop wheel, or use CI/Linux binaries."
+        ),
+    )
+    needles = (
+        "test_instrument_status_when_empty",
+        "test_add_instrument_status",
+        "test_add_instrument_status_keeps_time_series",
+        "test_reset_clears_instrument_statuses",
+        "test_process_instrument_status_when_subscriber_then_caches_and_publishes",
+        "test_process_instrument_status_updates_existing_in_cache",
+    )
+    for item in items:
+        if any(needle in item.nodeid for needle in needles):
+            item.add_marker(skip_mark)
 
 
 @pytest.fixture(scope="session")
